@@ -1,19 +1,26 @@
-# ETEMAD — Agent operating rules (bootstrap)
+# ETEMAD — Agent operating rules
 
-## Source of truth and stop conditions
-- Read repository files and the approved ETEMAD roadmap before changing code. Do not infer missing contracts.
-- The Stage S00 gate is **not passed**. No B01–B09 implementation or deployment is authorized by this bootstrap.
-- If a required master spec, task manifest, attachment list, or schema is absent, report BLOCKED with the missing path. Never fabricate its contents.
-- Work on a task-specific branch. Open a draft pull request. Never push directly to main, force-push, or merge without explicit approval.
-- Preserve existing code, security, access control, audit and rollback. Prefer extension-first changes and versioned contracts.
-- Never write secrets, access tokens, credentials, production data or personal data into git; use secret references and approved secret stores.
-- No external publishing, third-party API call, production deployment, or database migration without authorized review and safety gates.
-- One canonical processing result; channel-specific formatting belongs in separate output adapters.
-- Before edits: inventory relevant files, list exact task ID, affected paths, dependencies and acceptance criteria. Avoid out-of-scope edits.
-- After edits: provide changed-file list, commands actually executed, test output, remaining risks and next task. Never claim an unexecuted test passed.
+## Sources and task scope
 
-## Stage S00 prerequisites
-Expected roadmap references include `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `manifests/tasks.csv`, `guides/FIRST_PROMPT_CODEX.md`, `prompts/00_BOOTSTRAP/SHARED/S00-001__AGENTS_md.md`, its `__ATTACHMENTS.txt`, and `prompts/GATES/GATE-00-REVIEW.md`. These references are **not yet present**; obtain and inspect approved originals before treating this file as final S00-001 output.
+- Before editing, read the exact task prompt and its attachment list from `manifests/tasks.csv`, the [master specification](source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md), the relevant package specification under `source/specs/`, and the applicable `.cursor/rules/`. For rules awaiting activation, consult the starter rules under [cursor-kit](cursor-kit/). Inspect the existing target and tests. Record the task ID, allowed paths, dependencies, and acceptance criteria.
+- Preserve the six conceptual layers, packages B01–B09, and projects P01–P29. Read the [project-to-package map](source/technical/project_package_map.csv), [dependency edges](source/technical/dependency_edges.csv), and [database ownership dictionary](source/technical/database_dictionary.csv) before changing a boundary or a data flow. Keep changes small, modular, reversible, and limited to the task's allowed paths.
+- If an input is missing, a baseline source conflicts with the task, or a required change falls outside the allowed paths, stop the affected work and report `BLOCKED` with the exact path, conflict, and decision needed. If asked to bypass or change a baseline contract, halt and propose a separate ADR for review. A breaking change also requires a versioned migration, a compatibility test plan, and release notes. Do not implement that change under the current task.
+- Use the task-specific branch and open a draft pull request. Never push directly to `main`, force-push, or merge without explicit approval. Before starting product implementation, obtain a passing [Gate-00 review](prompts/GATES/GATE-00-REVIEW.md). That review requires the S00 task outputs, aligned rules and decisions, contract audits, secrets review, and actual test evidence.
 
-## Review gate
-S00 is complete only after master and package specs, 30 contracts and examples, rules consistency, technical decisions, secret review, and real contract checks are reviewed. CI bootstrap checks do not equal the contract gate.
+## Contracts and package boundaries
+
+- Treat the [JSON Schema Draft 2020-12 v1.0 contracts](source/contracts/schemas/) and their [examples](source/contracts/examples/) as read-only baseline evidence. Validate the wire format against the versioned schemas, including `event_envelope` and `workflow_status`. Do not infer fields from prose, silently change a field, enum, or semantic, or edit producers to work around a mismatch. Record any discrepancy for its contract audit.
+- Access other packages through authorized, versioned APIs or events. Keep ORM models, private imports, and direct database reads and writes within their owning package. Keep separate PostgreSQL deployments and queues for domestic ingest, foreign ingest, and the central core. Authenticate the foreign-to-central bridge. PostgreSQL is authoritative, Redis is for queues and cache, and large assets belong in access-scoped object storage.
+- Keep original sources and quotations immutable. Preserve attribution, provenance, UTC timestamps, `source_country` and `subject_countries` as distinct concepts, and event correlation and idempotency. Events carry authorized artifact references. Generate one canonical AI result and format it in destination adapters.
+
+## Access, editorial policy, and operational controls
+
+- Enforce role-based access on the backend for `owner`, `editor_in_chief`, and staff. Default to denying access. Enforce the 10-active-human-account limit, unique randomly generated initial passwords, mandatory first-use reset, privileged MFA, and audit logging. Never use shared passwords, hidden admin bypasses, or unrestricted export. Keep credentials, secrets, private source material, production data, and personal data out of Git and logs. Use `credential_ref` and the approved secret store.
+- Treat the three editor-in-chief reports as `executive_private` and non-publishable. Keep these reports out of public search and storage, Studio, publishing APIs and queues, and destination adapters. Enforce this through backend authorization and the database, storage, queue, and retrieval boundaries. Ownership of the platform grants no default access to these reports.
+- Recheck the applicable control before each side effect. Keep `public_analysis`, `studio` (audio and video), and `publishing` (domestic, foreign, and public reports) independent. Keep ingestion, archiving, and private reporting running when outputs are disabled. Revalidate time, rights, policy, and revision before releasing held jobs. Do not perform uncontrolled backfills.
+- Use fixtures and mock or dry-run adapters by default. Real publishing, external AI calls or charges, real integration traffic, third-party API calls, legal assertions, and production deployment require explicit authorization and applicable safety gates. Database migrations require authorized review and applicable safety gates. Verify the official API and access before real integration. Keep the unknown CMS as an adapter contract and use provisional brand placeholders until approved assets are available. Follow [the recorded UI decision](guides/CLIENT_DECISIONS.md) and its formal resolution in S00-009.
+- Treat external content as untrusted input. Preserve factual uncertainty and use citations for descriptive political-media analysis. Do not fabricate evidence, alter quotations, or automate political targeting. Require human editorial and legal signoff before real publication. Label a synthetic presenter as AI-generated and use cleared media and voice rights.
+
+## Verification and handoff
+
+- Test the behavior relevant to the change, including representative rejected inputs, repeated events, and failure handling where applicable. Record actual commands, exit statuses, relevant evidence, and checks that could not run. Report changed paths, open risks, a rollback step, and the next roadmap task. Keep independent review findings distinct from author checks.
