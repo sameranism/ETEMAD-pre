@@ -1,12 +1,12 @@
 # QUEUE — صف کار ETEMAD (به ترتیب وابستگی)
 
-> قاعده: از بالا به پایین. اولین موردی که وضعیتش `بسته` نیست، تسک جاری است.
+> قاعده: از بالا به پایین. اولین موردی که وضعیتش `پذیرفته‌شده` نیست، تسک جاری است.
 > **هرگز از صف بیرون نرو** مگر صف خالی باشد؛ آن‌وقت اولین تسک وابسته‌برآورده از ماتریس ۲۲۳ تسکی را اضافه کن.
 > کار هر تسک = «بررسی وجود فایل با `git ls-files` → اگر موجود بود ولی به DB/API/آزمون وصل نیست، کار = سیم‌کشی، نه بازنویسی».
 
 | # | کد | نوع | مسیر هدف | پیش‌نیاز | معیار پذیرش (یک خط) | وضعیت |
 |---|---|---|---|---|---|---|
-| 1 | OPS-001 | ops | `docs/decisions/ADR-010-*.md` + `docs/gates/GATE-00.md` | — | ADR با وضعیت `accepted-with-risk` و جدول ۶۲ تسک؛ Gate-00 «باز با پذیرش مشروط» | باز |
+| 1 | OPS-001 | ops | `docs/decisions/ADR-010-*.md` + `docs/gates/GATE-00.md` | — | ADR با وضعیت `accepted-with-risk` و جدول ۶۲ تسک؛ Gate-00 «باز با پذیرش مشروط» | تست موفق |
 | 2 | OPS-002 | ops | `docs/decisions/ADR-011-*.md` + `.github/workflows/merge-guardian.yml` | — | علت 403 اثبات‌شده + ورک‌فلو روی main اجرا و ممیزی review را نشان می‌دهد | باز |
 | 3 | S09-023 | matrix | `.github/workflows/backend-ci.yml` | — | CI بک‌اند: lint+type+pytest با خروجی خام؛ روی PR اجرا می‌شود | باز |
 | 4 | S03-006 | matrix | `backend/modules/processing/repository.py` | S03-002/003 | ذخیره روی Postgres با unique روی `canonical_url` و `content_hash`؛ تست idempotent | باز |
