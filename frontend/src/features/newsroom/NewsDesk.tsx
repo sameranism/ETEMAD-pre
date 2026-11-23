@@ -28,6 +28,15 @@ const streamNames: Record<Stream, string> = {
   all: "همه", domestic: "داخلی", foreign: "خارجی", manual: "دستی",
 };
 
+function safeHttpUrl(value: string): string | null {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export default function NewsDesk({ items, state = "ready" }: Props) {
   const [stream, setStream] = useState<Stream>("all");
   const visible = items.filter((item) => item.stream === stream || stream === "all");
@@ -53,22 +62,28 @@ export default function NewsDesk({ items, state = "ready" }: Props) {
       {state === "ready" && visible.length === 0 && <p className="message">در این جریان خبری نیست.</p>}
       {state === "ready" && visible.length > 0 && (
         <ul className="news-list">
-          {visible.map((item) => (
+          {visible.map((item) => {
+            const sourceUrl = safeHttpUrl(item.original_url);
+            return (
             <li key={item.news_id} className="news-item">
               <div className="news-meta">
                 <span>{streamNames[item.stream]}</span>
                 <span dir="ltr">{item.news_id}</span>
+                <span dir="ltr">{item.source_id}</span>
                 <time dateTime={item.collected_at}>
                   {new Intl.DateTimeFormat("fa-IR", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tehran" }).format(new Date(item.collected_at))}
                 </time>
               </div>
               <h3 dir={item.language === "fa" ? "rtl" : "ltr"}>{item.original_title}</h3>
               <p>{item.reuse_permission === "unverified" ? "حق بازنشر تأیید نشده" : "وضعیت حق استفاده: " + item.reuse_permission}</p>
-              <a href={item.original_url} target="_blank" rel="noopener noreferrer" dir="ltr">
-                منبع نمونه <span className="sr-only">(در پنجره جدید)</span>
-              </a>
+              {sourceUrl ? (
+                <a href={sourceUrl} target="_blank" rel="noopener noreferrer">
+                  منبع نمونه <span className="sr-only">(در پنجره جدید)</span>
+                </a>
+              ) : <span>نشانی منبع نامعتبر است</span>}
             </li>
-          ))}
+            );
+          })}
         </ul>
       )}
     </section>
