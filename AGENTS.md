@@ -5,6 +5,14 @@
 - Task prompt identifies the allowed files. Do not edit other files or contracts; if impossible, report the exact blocker and request a separate task/ADR.
 - This repo uses 6 conceptual layers, 9 packages B01..B09, 29 projects P01..P29; IDs do not change.
 
+## Mandatory task and Gate control
+- Before editing, read the exact task row in `manifests/tasks.csv`, its `prompt_path` and `attachments_path`, all listed source attachments, the master and package specifications, and the applicable `.cursor/rules/*.mdc`. Record task ID, allowed TARGET file, dependencies, acceptance criteria, baseline branch and source commit SHA. If any required reference is absent, STOP and report `BLOCKED`.
+- Change only the exact task TARGET on its own task branch and open a draft PR. Never push directly to `main`, force-push or merge without explicit approval and independent review. A multi-task snapshot or a successful CI run is not independent acceptance.
+- **Before product implementation or any downstream integration merge, require an independently documented PASS of Gate-00** under `prompts/GATES/GATE-00-REVIEW.md`, with all S00 outputs, semantic contract audits, ADR decisions, secrets review, positive/negative tests and real CI evidence. If missing or failed, STOP the affected work: `BLOCKED`, not PASS.
+- If a user or agent requests bypassing a frozen schema, silently renaming an `event_envelope`/`workflow_status` field, skipping a Gate, touching unauthorized paths, or invoking real publishing/AI/deployment without its approval, STOP and state the exact conflict and source path. Propose a **separate ADR/change task for independent review**; never implement that bypass under the current task. Contract changes require a new version, producer/consumer compatibility tests, release notes and a migration window.
+- Before changing a package boundary or data flow, consult `source/technical/project_package_map.csv`, `source/technical/dependency_edges.csv` and `source/technical/database_dictionary.csv`. Keep P/B ownership fixed, protect `executive_private` through backend/DB/queue/retrieval boundaries, and retain the three separate PostgreSQL/queue environments.
+- For every task report actual commands, exit codes, relevant positive and negative results, test gaps, reviewer identity, PR and commit links, and rollback. A missing test or independent review is `NOT_RUN`; never treat file presence or a merged snapshot as Gate PASS.
+
 ## Non-destructive modular development
 - Prefer a small stable core and independently testable feature modules with minimal dependencies.
 - Versioned JSON Schema Draft 2020-12 v1.0 is the data contract. Never silently change a required field/enum/semantics; preserve old examples.
