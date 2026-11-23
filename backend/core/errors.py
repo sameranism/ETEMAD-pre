@@ -27,6 +27,7 @@ class ErrorCode(str, Enum):
     UNAUTHORIZED = "unauthorized"
     FORBIDDEN = "forbidden"
     NOT_FOUND = "not_found"
+    METHOD_NOT_ALLOWED = "method_not_allowed"
     CONFLICT = "conflict"
     INVALID_STATE = "invalid_state"
     RATE_LIMITED = "rate_limited"
@@ -39,6 +40,7 @@ _STATUS = {
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.FORBIDDEN: 403,
     ErrorCode.NOT_FOUND: 404,
+    ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.CONFLICT: 409,
     ErrorCode.INVALID_STATE: 422,
     ErrorCode.RATE_LIMITED: 429,
@@ -51,6 +53,7 @@ _SAFE_MESSAGES = {
     ErrorCode.UNAUTHORIZED: "Authentication required",
     ErrorCode.FORBIDDEN: "Access denied",
     ErrorCode.NOT_FOUND: "Not found",
+    ErrorCode.METHOD_NOT_ALLOWED: "Method not allowed",
     ErrorCode.CONFLICT: "Revision conflict",
     ErrorCode.INVALID_STATE: "Invalid state",
     ErrorCode.RATE_LIMITED: "Rate limit exceeded",
@@ -132,6 +135,7 @@ def install_exception_handlers(app: FastAPI) -> None:
             401: ErrorCode.UNAUTHORIZED,
             403: ErrorCode.FORBIDDEN,
             404: ErrorCode.NOT_FOUND,
+            405: ErrorCode.METHOD_NOT_ALLOWED,
             409: ErrorCode.CONFLICT,
             422: ErrorCode.INVALID_STATE,
             429: ErrorCode.RATE_LIMITED,
