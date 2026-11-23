@@ -31,7 +31,6 @@ jobs:
   backend-tests:
     name: backend unit tests
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('backend/tests/**') != '' }}
     steps:
       - uses: actions/checkout@v4
 
