@@ -38,7 +38,7 @@ def create_app(*, expose_openapi: bool | None = None) -> FastAPI:
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
         supplied = request.headers.get("X-Correlation-ID", "")
         correlation_id = supplied if _CORRELATION_ID.fullmatch(supplied) else str(uuid4())
-        _LOG.error("Unhandled API error correlation_id=%s", correlation_id, exc_info=exc)
+        _LOG.error("Unhandled API error correlation_id=%s", correlation_id)
         return JSONResponse(
             status_code=500,
             content={
