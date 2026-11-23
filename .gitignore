@@ -1,4 +1,9 @@
-# Secrets and local configuration
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Secrets and credentials — never commit
 .env
 .env.*
 !.env.example
@@ -6,29 +11,43 @@
 *.key
 *.p12
 *.pfx
-secrets/
-credentials/
+credentials*.json
+secrets*.json
+*.secret
+
 # Python
 __pycache__/
 *.py[cod]
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+*.egg-info/
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
 htmlcov/
-# Node/React
+*.sqlite
+*.sqlite3
+*.db
+
+# Node / web
 node_modules/
-.next/
 dist/
 build/
-coverage/
-# Local tooling
+.vite/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+
+# Local media and dumps (large, non-source)
+media/
+uploads/
+.local-objects/
+*.dump
+*.sql.gz
+backup*/
+
+# Editor
 .idea/
-.vscode/
-.DS_Store
-Thumbs.db
-# Logs and temp
-*.log
-*.tmp
+.vscode/*
+!.vscode/extensions.json

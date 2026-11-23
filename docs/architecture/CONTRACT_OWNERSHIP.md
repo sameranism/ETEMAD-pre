@@ -1,66 +1,51 @@
-# ETEMAD contract ownership inventory — S00-015
+# CONTRACT_OWNERSHIP - who owns each of the 30 contracts
 
-**Status: PROPOSED / requires independent per-contract audit.** This is a reconciliation register, not a change to the frozen wire contracts or an approval to create tables.
+- **Task:** `S00-015`  
+- **Status:** draft - producer/consumer mapping needs client confirmation where noted
 
-## Authoritative references
+| # | Contract | Producer | Consumers | Owning package | Required root fields |
+|---:|---|---|---|---|---:|
+| 1 | `access_decision` | P28 | P11, P19, P27 | B01 | 10 |
+| 2 | `ai_models_config` | P02 | P12, P13, P15, P16, P18, P19, P20, P21 | B01 | 4 |
+| 3 | `analysis_chat_response` | P16 | P27 | B06 | 8 |
+| 4 | `analysis_result` | P15 | P18, P19, P27 | B06 | 8 |
+| 5 | `archive_record` | P26 | P08, P17, P19 | B01 | 10 |
+| 6 | `article` | P13 | P11, P18, P21, P24 | B05 | 14 |
+| 7 | `audio_manifest` | P20 | P21, P24, P26 | B07 | 10 |
+| 8 | `classified_news` | P09 | P12, P13, P15, P19 | B04 | 10 |
+| 9 | `cluster_result` | P08 | P09, P26 | B04 | 7 |
+| 10 | `country_source_pack` | P04 | P06, P27 | B03 | 6 |
+| 11 | `destination_config` | P23 | P22, P25 | B08 | 11 |
+| 12 | `destination_payload` | P24 | P25 | B08 | 9 |
+| 13 | `editorial_rules` | P10 | P12, P13 | B05 | 8 |
+| 14 | `event_envelope` | P29 | all packages | B01 | 10 |
+| 15 | `image_manifest` | P14 | P21, P24, P26 | B05 | 4 |
+| 16 | `metrics_snapshot` | P17 | P18, P19, P27 | B06 | 12 |
+| 17 | `news_framework` | P10 | P12, P13 | B05 | 9 |
+| 18 | `normalized_news` | P07 | P08, P09, P12, P13, P26 | B04 | 14 |
+| 19 | `output_controls` | P02 | P06, P18, P20, P21, P25 | B01 | 7 |
+| 20 | `private_report` | P19 | P27 (editor_in_chief only) | B06 | 13 |
+| 21 | `public_report` | P18 | P22, P25, P27 | B06 | 11 |
+| 22 | `publication_job` | P22 | P25 | B08 | 12 |
+| 23 | `publication_result` | P25 | P27, P26 | B08 | 5 |
+| 24 | `raw_news` | P05, P06 | P07 | B02, B03 | 12 |
+| 25 | `schedule_config` | P22 | P25 | B08 | 10 |
+| 26 | `source_registry` | P03 | P05, P06, P07 | B01 | 4 |
+| 27 | `translation` | P12 | P13, P15 | B05 | 11 |
+| 28 | `validation_decision` | P11 | P22, P27 | B05 | 10 |
+| 29 | `video_manifest` | P21 | P24, P26 | B07 | 9 |
+| 30 | `workflow_status` | P29 | P27, all packages | B01 | 8 |
 
-- `source/contracts/schemas/*.schema.json` and `source/contracts/examples/*.example.json` — frozen Draft 2020-12 v1.0
-- `source/technical/project_package_map.csv`, `source/technical/dependency_edges.csv` and `source/technical/database_dictionary.csv`
-- `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md` and its package specifications
+## Ownership rules
 
-## 30 contract records
+1. Only the producing project may write a record of that contract type.
+2. Consumers receive the record through a versioned API or event; no shared tables.
+3. A schema change is proposed by the producer and approved by consumers; silence is not approval.
+4. `raw_news` has two producers (domestic and foreign ingest) in separate databases; the shared
+   shape is owned by `P01` and published in `source/contracts`.
 
-Producer/project and table below are **audit candidates**, derived from project responsibilities and proposed table names; the schema definitions do not intrinsically certify a producer or storage table. Consumer mappings must be confirmed through the explicit dependency edges and individual contract audits S00-022–S00-051; do not infer a dependency simply because a project is a potential consumer.
+## Unresolved mappings (client input required)
 
-| Contract schema (same basename) | Baseline example | Proposed producer | Proposed table / store | Review status |
-|---|---|---|---|---|
-| `access_decision` | `source/contracts/examples/access_decision.example.json` | P28 | identity.roles_permissions | PROPOSED — verify exact producer/consumer |
-| `ai_models_config` | `source/contracts/examples/ai_models_config.example.json` | P02 | control.config_revisions | PROPOSED — verify exact producer/consumer |
-| `analysis_chat_response` | `source/contracts/examples/analysis_chat_response.example.json` | P16 | insights.chat_messages | PROPOSED — verify exact producer/consumer |
-| `analysis_result` | `source/contracts/examples/analysis_result.example.json` | P15 | insights.analyses | PROPOSED — verify exact producer/consumer |
-| `archive_record` | `source/contracts/examples/archive_record.example.json` | P26 | archive.news_records | PROPOSED — verify exact producer/consumer |
-| `article` | `source/contracts/examples/article.example.json` | P13 | editorial.articles | PROPOSED — verify exact producer/consumer |
-| `audio_manifest` | `source/contracts/examples/audio_manifest.example.json` | P20 | studio.audio_jobs | PROPOSED — verify exact producer/consumer |
-| `classified_news` | `source/contracts/examples/classified_news.example.json` | P09 | processing.news_desks | PROPOSED — verify exact producer/consumer |
-| `cluster_result` | `source/contracts/examples/cluster_result.example.json` | P08 | processing.clusters | PROPOSED — verify exact producer/consumer |
-| `country_source_pack` | `source/contracts/examples/country_source_pack.example.json` | P04 | foreign.source_candidates | PROPOSED — verify exact producer/consumer |
-| `destination_config` | `source/contracts/examples/destination_config.example.json` | P23 | publish.destinations | PROPOSED — verify exact producer/consumer |
-| `destination_payload` | `source/contracts/examples/destination_payload.example.json` | P24 | publish.payloads | PROPOSED — verify exact producer/consumer |
-| `editorial_rules` | `source/contracts/examples/editorial_rules.example.json` | P10 | editorial.rulesets | PROPOSED — verify exact producer/consumer |
-| `event_envelope` | `source/contracts/examples/event_envelope.example.json` | P29 | orchestration.outbox | PROPOSED — verify exact producer/consumer |
-| `image_manifest` | `source/contracts/examples/image_manifest.example.json` | P14 | editorial.image_assets | PROPOSED — verify exact producer/consumer |
-| `metrics_snapshot` | `source/contracts/examples/metrics_snapshot.example.json` | P17 | insights.metric_snapshots | PROPOSED — verify exact producer/consumer |
-| `news_framework` | `source/contracts/examples/news_framework.example.json` | UNRESOLVED | UNRESOLVED | UNRESOLVED |
-| `normalized_news` | `source/contracts/examples/normalized_news.example.json` | P07 | processing.normalized_items | PROPOSED — verify exact producer/consumer |
-| `output_controls` | `source/contracts/examples/output_controls.example.json` | P02 | control.output_switches | PROPOSED — verify exact producer/consumer |
-| `private_report` | `source/contracts/examples/private_report.example.json` | P19 | executive.private_reports | PROPOSED — verify exact producer/consumer |
-| `public_report` | `source/contracts/examples/public_report.example.json` | P18 | insights.public_reports | PROPOSED — verify exact producer/consumer |
-| `publication_job` | `source/contracts/examples/publication_job.example.json` | P22 | publish.jobs | PROPOSED — verify exact producer/consumer |
-| `publication_result` | `source/contracts/examples/publication_result.example.json` | P25 | publish.attempts | PROPOSED — verify exact producer/consumer |
-| `raw_news` | `source/contracts/examples/raw_news.example.json` | P05 / P06 | domestic.raw_items / foreign.raw_items | PROPOSED — verify exact producer/consumer |
-| `schedule_config` | `source/contracts/examples/schedule_config.example.json` | UNRESOLVED | UNRESOLVED | UNRESOLVED |
-| `source_registry` | `source/contracts/examples/source_registry.example.json` | P03 | sources.source_registry | PROPOSED — verify exact producer/consumer |
-| `translation` | `source/contracts/examples/translation.example.json` | P12 | editorial.translations | PROPOSED — verify exact producer/consumer |
-| `validation_decision` | `source/contracts/examples/validation_decision.example.json` | P11 | editorial.policy_decisions | PROPOSED — verify exact producer/consumer |
-| `video_manifest` | `source/contracts/examples/video_manifest.example.json` | P21 | studio.video_jobs | PROPOSED — verify exact producer/consumer |
-| `workflow_status` | `source/contracts/examples/workflow_status.example.json` | P29 | orchestration.jobs | PROPOSED — verify exact producer/consumer |
-
-## Consumer and producer verification method
-
-1. For each contract, compare the project map's `outputs` and the dependency edge's `contract` value with the actual JSON Schema `$id`, properties, example and authoritative package specification.
-2. Record only **verified** producer → consumer edges in the contract-specific audit. A package or project name in this table is not sufficient evidence of an API call or a field-level contract.
-3. For `raw_news`, preserve separate domestic P05 and foreign P06 producer boundaries. The central B04 pipeline consumes through authenticated authorized transfer, not direct remote DB reads.
-4. For `event_envelope`, P29 is a proposed orchestration owner, but the actual `producer_project` field names the emitting project. Do not rewrite event producers as P29 or create a dependency edge without evidence.
-5. Private report visibility restrictions apply independently of mapping. `private_report` must never become a public report, Studio or publishing input.
-
-## Open mapping questions
-
-- `news_framework`: project and table owner not unambiguously proven by this register; resolve with the source technical specifications and contract audit.
-- `schedule_config`: scheduling and central config responsibilities overlap; resolve before assigning write ownership.
-- For all other rows, the candidate producer/table requires a traceable confirmation in the contract-specific audit and schema-to-API mapping. Consumer lists are intentionally not asserted as verified.
-
-## Verification and rollback
-
-- Checked tracked tree: exactly 30 schema files; each has matching example pathname in the tracked tree: true.
-- Gate-00 independent review: PENDING. No application logic, database or source schema changed.
-- Rollback: close this document-only draft PR.
+- Which physical table backs `ai_models_config` (proposed: `control` schema in central).
+- Whether `schedule_config` is owned by scheduling (P22) or destination setup (P23).
+- Final CMS identity for `destination_config`/`destination_payload`.

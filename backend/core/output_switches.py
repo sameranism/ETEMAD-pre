@@ -1,77 +1,91 @@
-"""B01/P02 output decisions; callers must check again immediately before effects."""
+"""B01/P02 the three independent output switches (ADR-004).
 
-from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
-from typing import Any
+Turning an output off must never stop ingestion, archiving or the private EIC
+reports. Each switch is read before a side effect, never cached per process.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Mapping
 
 from backend.core.contracts import validate_payload
 
-OUTPUTS = frozenset(
-    {
-        "public_analysis",
-        "studio.audio",
-        "studio.video",
-        "publishing.domestic",
-        "publishing.foreign",
-        "publishing.public_reports",
+PUBLIC_ANALYSIS = "public_analysis"
+STUDIO = "studio"
+PUBLISHING = "publishing"
+OUTPUTS = (PUBLIC_ANALYSIS, STUDIO, PUBLISHING)
+
+_STUDIO_CHANNELS = {"audio": "audio_enabled", "video": "video_enabled"}
+_PUBLISHING_STREAMS = {
+    "domestic": "domestic_enabled",
+    "foreign": "foreign_enabled",
+    "public_report": "public_reports_enabled",
+    "public_reports": "public_reports_enabled",
+}
+
+
+class OutputDisabled(Exception):
+    """A side effect was requested while its output switch is off."""
+
+
+@dataclass(frozen=True)
+class OutputSwitches:
+    """A validated ``output_controls`` record."""
+
+    record: Mapping[str, Any]
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> "OutputSwitches":
+        validate_payload("output_controls", record)
+        return cls(record=dict(record))
+
+    @property
+    def revision(self) -> int:
+        return int(self.record["revision"])
+
+    def enabled(self, output: str) -> bool:
+        if output not in OUTPUTS:
+            raise KeyError(f"unknown output: {output!r}")
+        section = self.record[output]
+        if not isinstance(section, Mapping) or not section.get("enabled"):
+            return False
+        return True
+
+    def studio_channel_enabled(self, channel: str) -> bool:
+        if channel not in _STUDIO_CHANNELS:
+            raise KeyError(f"unknown studio channel: {channel!r}")
+        if not self.enabled(STUDIO):
+            return False
+        return bool(self.record[STUDIO].get(_STUDIO_CHANNELS[channel]))
+
+    def publishing_stream_enabled(self, stream: str) -> bool:
+        field = _PUBLISHING_STREAMS.get(stream)
+        if field is None:
+            raise KeyError(f"unknown publishing stream: {stream!r}")
+        if not self.enabled(PUBLISHING):
+            return False
+        return bool(self.record[PUBLISHING].get(field))
+
+    def require(self, output: str) -> None:
+        if not self.enabled(output):
+            raise OutputDisabled(f"output {output!r} is disabled")
+
+
+def default_off_switches() -> OutputSwitches:
+    """Fail-safe baseline: every output off, valid against the contract."""
+    record = {
+        "schema_version": "1.0",
+        "revision": 1,
+        "updated_at": "1970-01-01T00:00:00Z",
+        "updated_by": "system-default",
+        "public_analysis": {"enabled": False},
+        "studio": {"enabled": False, "audio_enabled": False, "video_enabled": False},
+        "publishing": {
+            "enabled": False,
+            "domestic_enabled": False,
+            "foreign_enabled": False,
+            "public_reports_enabled": False,
+        },
     }
-)
-_CONTINUOUS = frozenset({"ingest", "archive", "private_report"})
-
-
-class OutputBlocked(PermissionError):
-    """The current control revision does not permit this output."""
-
-
-def require_output_enabled(
-    load_controls: Callable[[], Mapping[str, Any]],
-    output: str,
-    *,
-    classification: str = "internal",
-    held: bool = False,
-    deadline_at: datetime | None = None,
-    expected_revision: int | None = None,
-    revalidate: Callable[[], bool] | None = None,
-    now: datetime | None = None,
-) -> int:
-    """Load current controls on every call, including immediately before dispatch.
-
-    This decision does not replace actor authorization or rights checks.
-    A held job needs a fresh policy/rights callback and an unexpired deadline.
-    """
-    if output not in OUTPUTS | _CONTINUOUS:
-        raise OutputBlocked("Unknown output")
-    if classification == "executive_private" and output != "private_report":
-        raise OutputBlocked("Private reports cannot enter output or general archive paths")
-
-    controls = load_controls()
-    validate_payload("output_controls", controls)
-    revision = controls["revision"]
-
-    if held:
-        current_time = now or datetime.now(timezone.utc)
-        if (
-            deadline_at is None
-            or deadline_at.tzinfo is None
-            or deadline_at <= current_time
-            or expected_revision is None
-            or expected_revision != revision
-            or revalidate is None
-            or not revalidate()
-        ):
-            raise OutputBlocked("Held job requires current authorization and deadline")
-
-    if output in _CONTINUOUS:
-        return revision
-    if output == "public_analysis":
-        allowed = controls["public_analysis"]["enabled"]
-    elif output.startswith("studio."):
-        key = "audio_enabled" if output == "studio.audio" else "video_enabled"
-        allowed = controls["studio"]["enabled"] and controls["studio"][key]
-    else:
-        key = output.split(".", 1)[1] + "_enabled"
-        allowed = controls["publishing"]["enabled"] and controls["publishing"][key]
-
-    if not allowed:
-        raise OutputBlocked("Output disabled")
-    return revision
+    return OutputSwitches.from_record(record)
