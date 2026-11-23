@@ -1,8 +1,4 @@
-"""B01/P01 API composition.
-
-Importing this module does not initialize a database, queue, or external client.
-Routers are added explicitly as their owning tasks become available.
-"""
+"""B01 API composition with an explicitly local synthetic-news adapter."""
 
 import logging
 import os
@@ -17,7 +13,6 @@ _CORRELATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def create_app(*, expose_openapi: bool | None = None) -> FastAPI:
-    """Create the API; documentation is opt-in, including in local environments."""
     if expose_openapi is None:
         expose_openapi = os.getenv("ETEMAD_EXPOSE_OPENAPI") == "1"
 
@@ -31,8 +26,12 @@ def create_app(*, expose_openapi: bool | None = None) -> FastAPI:
 
     @app.get("/health", include_in_schema=False)
     async def health() -> dict[str, str]:
-        # Liveness only: no database or dependency state is disclosed.
         return {"status": "ok"}
+
+    if os.getenv("ETEMAD_ENV") == "local" and os.getenv("ETEMAD_DEMO_MODE") == "1":
+        from backend.app.demo_news import router as demo_router
+
+        app.include_router(demo_router)
 
     @app.exception_handler(Exception)
     async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
