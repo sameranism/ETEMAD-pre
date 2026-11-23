@@ -1,6 +1,10 @@
 """Synthetic read-only adapter for local UI development; never fetches live news."""
 
+from functools import lru_cache
+
 from fastapi import APIRouter
+
+from backend.core.contracts import validate_payload
 
 router = APIRouter(prefix="/v1/demo", tags=["local-demo"])
 
@@ -48,6 +52,13 @@ _NEWS = (
 )
 
 
+@lru_cache(maxsize=1)
+def _validated_news() -> tuple[dict[str, object], ...]:
+    for record in _NEWS:
+        validate_payload("normalized_news", record)
+    return _NEWS
+
+
 @router.get("/news")
 async def demo_news() -> dict[str, object]:
-    return {"schema_version": "1.0", "mode": "synthetic", "items": _NEWS}
+    return {"schema_version": "1.0", "mode": "synthetic", "items": _validated_news()}
