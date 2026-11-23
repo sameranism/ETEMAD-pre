@@ -37,7 +37,8 @@ jobs:
               dependencies = tomllib.load(manifest)["project"]["dependencies"]
           subprocess.run([
               sys.executable, "-m", "pip", "install", "--group",
-              "backend/pyproject.toml:dev", "mypy==1.19.1", *dependencies,
+              "backend/pyproject.toml:dev", "mypy==1.19.1",
+              "types-jsonschema==4.26.0.20261006", *dependencies,
           ], check=True)
           PY
 
