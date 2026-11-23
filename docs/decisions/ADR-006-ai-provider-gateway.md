@@ -1,20 +1,47 @@
-# ADR-006 — Provider-neutral AI model gateway
+# ADR-006 — AI provider gateway: interchangeable models, budgets, provenance
 
-**Status:** Proposed for S00 independent review. **Task:** S00-013.
+- **Status:** Accepted
+- **Date:** 2026-11-23
+- **Task:** S00-013
+- **Source:** `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `source/contracts/schemas/ai_models_config.schema.json`
 
-## Baseline
-`source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, B01 and B05/B06 specifications, `guides/CLIENT_DECISIONS.md`, the P01 contract set and `AGENTS.md`.
+## Context
 
-## Proposed decision
-- Route authorized model calls via a **replaceable provider adapter interface** with versioned input/output contracts. No model/provider hard-coding in core news-processing, translation, analysis, chat or report generation logic.
-- Support a configurable task/model mapping, token and monetary budgets, concurrency limits, deadlines, bounded retries, circuit-breaker behavior and auditable fallbacks. Fallback must be permitted by the task's confidentiality, output rights and cost policy; never silently downgrade privacy or change semantics.
-- Store model ID, provider ID, prompt/config revision, bounded latency and usage/cost provenance in restricted audit metadata without secrets, sensitive news content or private report text. Use scoped `credential_ref` backed by the approved vault; no tokens in repository or developer chat.
-- Treat news and retrieved materials as untrusted. Validate outputs to relevant frozen JSON Schema Draft 2020-12 v1.0 contracts; distinguish unsupported claims from supported, attributable evidence. Preserve original text, quotations and provenance.
-- Keep generated content private until applicable human editorial/legal and backend policy decisions. Respect `executive_private` scope at retrieval and provider-routing boundaries. Do not send restricted payloads to unapproved external models or logs.
-- **External AI traffic and billing are disabled by default**. Build and test mock provider adapters first; turn on a real provider only after independently verified API terms, permissions, budgets, security and explicit authorization.
+Translation, summarization, political analysis, reporting and studio narration all use language models.
+Providers change, prices change, and free text must never leak personal data or secrets into a third-party
+log. Hard-coding one provider would make the product dependent on a single vendor and a single price list.
 
-## Trade-offs / follow-up
-Provider neutrality adds minimal adapter and observability overhead but avoids proprietary lock-in. Exact models, commercial limits, provider fallback order, key management and data residency are unresolved decisions for owning tasks. Do not infer that an API key has been supplied or that calls have been tested.
+## Decision
 
-## Acceptance and rollback
-Test adapter contract validation, timeout/retry, rate-limit/budget, privacy-denied routing, failure and fallback using deterministic mocks. Reviewer signoff and real logs are required for Gate-00. Rollback: close the draft PR; no live provider access to revoke from this task.
+1. **One gateway** (`backend/core/ai_gateway.py`) exposes task-oriented calls
+   (`translate`, `summarize`, `classify`, `analyze`, `draft`, `narrate`). Feature code never imports a
+   provider SDK directly.
+2. **Configuration comes from the `ai_models_config` contract**: per-task provider, model, timeout,
+   retry policy, budget and `credential_ref`. Secrets live only in the vault; `credential_ref` is a pointer.
+3. **Fallback is explicit and bounded:** primary, optional fallback, no silent provider switching on
+   content-moderation or billing errors; every fallback is recorded.
+4. **Budgets:** a per-run and per-month ceiling is enforced before the call; exceeding it returns
+   `dependency_unavailable` and leaves the job `held`, never retries unbounded.
+5. **Provenance:** every AI output stored with the product record records provider, model, prompt template
+   version, timestamp and request id — enough to reproduce a disputed result.
+6. **Logging:** prompts and completions are logged only as redacted summaries with hashes; no personal
+   data, no secrets, no full source documents in logs.
+7. **Default state is off.** No external model call occurs without an explicit switch and a configured,
+   authorized key. Development uses deterministic fixtures.
+
+## Consequences
+
+- A new provider is an adapter plus config change, not a code change in feature modules.
+- Tests can run fully offline with a recording adapter.
+- Cost anomalies are visible per task and per month before they become an invoice.
+
+## Impacted contracts
+
+`ai_models_config`, `translation`, `analysis_result`, `analysis_chat_response`, `metrics_snapshot`,
+`public_report`, `private_report`, `audio_manifest`, `video_manifest`.
+
+## Open external dependencies
+
+- Which providers are permitted and billable for the newspaper (client decision).
+- Monthly budget ceiling and approval path for overages.
+- Data-residency and confidentiality terms for foreign providers.

@@ -1,18 +1,26 @@
-"""B01 API composition with an explicitly local synthetic-news adapter."""
+"""B01/P01 API composition with an explicitly local synthetic-news adapter.
 
-import logging
+The application installs exactly one set of exception handlers (``errors.py``)
+and one versioned router. A local demo router exists only when both
+``ETEMAD_ENV=local`` and ``ETEMAD_DEMO_MODE=1`` are set.
+"""
+
+from __future__ import annotations
+
 import os
-import re
-from uuid import uuid4
 
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI
 
-_LOG = logging.getLogger(__name__)
-_CORRELATION_ID = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+from backend.app.api_router import router
+from backend.app.dependencies import Services, build_services
+from backend.core.errors import install_exception_handlers
 
 
-def create_app(*, expose_openapi: bool | None = None) -> FastAPI:
+def create_app(
+    *,
+    expose_openapi: bool | None = None,
+    services: Services | None = None,
+) -> FastAPI:
     if expose_openapi is None:
         expose_openapi = os.getenv("ETEMAD_EXPOSE_OPENAPI") == "1"
 
@@ -24,30 +32,19 @@ def create_app(*, expose_openapi: bool | None = None) -> FastAPI:
         openapi_url="/openapi.json" if expose_openapi else None,
     )
 
+    app.state.services = services if services is not None else build_services()
+    install_exception_handlers(app)
+    app.include_router(router)
+
     @app.get("/health", include_in_schema=False)
-    async def health() -> dict[str, str]:
+    async def liveness() -> dict[str, str]:
+        """Process liveness only; dependency state lives at ``/v1/health``."""
         return {"status": "ok"}
 
     if os.getenv("ETEMAD_ENV") == "local" and os.getenv("ETEMAD_DEMO_MODE") == "1":
         from backend.app.demo_news import router as demo_router
 
         app.include_router(demo_router)
-
-    @app.exception_handler(Exception)
-    async def unhandled_error(request: Request, exc: Exception) -> JSONResponse:
-        supplied = request.headers.get("X-Correlation-ID", "")
-        correlation_id = supplied if _CORRELATION_ID.fullmatch(supplied) else str(uuid4())
-        _LOG.error("Unhandled API error correlation_id=%s", correlation_id)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "code": "internal_error",
-                "message": "Internal server error",
-                "correlation_id": correlation_id,
-                "details": None,
-            },
-            headers={"X-Correlation-ID": correlation_id},
-        )
 
     return app
 

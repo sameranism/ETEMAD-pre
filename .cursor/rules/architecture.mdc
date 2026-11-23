@@ -1,5 +1,6 @@
 ---
-description: ETEMAD package ownership, data flow, and deployment boundaries for all repository changes
+description: ETEMAD package ownership, event contracts, security and deployment boundaries for code edits
+globs: "**/*.py,**/*.ts,**/*.tsx,**/*.yaml,**/*.yml"
 alwaysApply: true
 ---
 

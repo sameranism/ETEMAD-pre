@@ -1,7 +1,7 @@
 # Contract audit - `event_envelope`
 
 - **Task:** `S00-035` (phase 0)
-- **Status:** draft - generated from the frozen schema; independent review pending (Gate-00)
+- **Status:** draft — schema/example validation PASS; semantic audit BLOCKED pending architecture ADR and independent signoff (Gate-00)
 - **Schema:** `source/contracts/schemas/event_envelope.schema.json`
 - **Example:** `source/contracts/examples/event_envelope.example.json`
 - **Schema id:** `https://contracts.etemad.example/schemas/event_envelope.schema.json`
@@ -58,7 +58,7 @@
 - A required-field or enum change needs a new version, an ADR and producer/consumer tests.
 - Consumers must reject unknown `schema_version` and warn with the record id.
 
-## Independent reviewer finding — architecture prose versus frozen wire schema
+## Independent review status (non-normative)
 
 **Status:** BLOCKED on semantic audit / separate ADR decision; schema and example validation are PASS. This is an audit finding, **not** a proposal to silently edit v1.0 wire messages.
 
@@ -68,7 +68,7 @@
 - **Decision required:** approve an ADR clarifying that v1.0 wire format is authoritative (`type` → `event_type`, `timestamp` → `occurred_at`, with UTC normalization by the producer), and explicitly choose whether `stream` is only an internal routing concept or merits a separately versioned new contract. Do not modify the v1.0 schema or producers in this audit task.
 - **Owner:** B01/P29. All package consumers require compatibility review. Create an independent ADR/change-request task before changing implementation if any semantic difference is approved.
 
-## Verification evidence (2026-11-23)
+### Verification evidence (2026-11-23)
 
 - Staging snapshot `/srv/etemad/staging` (no code changes): `python -B tools/validate_contracts.py` → exit 0, 30 schema/example pairs PASS.
 - `python -B tools/preflight.py S00-035 --pack .` → exit 0 (target and 4 attachments found). File availability is not semantic acceptance.
