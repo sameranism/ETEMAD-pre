@@ -43,7 +43,7 @@ jobs:
           PY
 
       - name: Lint
-        run: python -m ruff check backend
+        run: python -m ruff check --config 'src=["."]' backend
 
       - name: Type check
         if: ${{ !cancelled() && steps.install.outcome == 'success' }}
