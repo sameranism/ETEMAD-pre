@@ -1,20 +1,48 @@
-# ADR-004 — Publication, editorial rights and output gates
+# ADR-004 — Publishing gates and output controls
 
-**Status:** Proposed pending S00/Gate-00 independent review. **Task:** S00-011.
+- **Status:** Accepted
+- **Date:** 2026-11-23
+- **Task:** S00-011
+- **Source:** `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `source/specs/B08_PUBLISHING_TECHNICAL_SPEC.md`,
+  `source/contracts/README-fa.md`
 
-## References
-Master architecture v1.1, B05 editorial and B08 publishing specifications, `AGENTS.md`, `source/contracts/schemas/` frozen v1.0 contracts, and the client decisions guide.
+## Context
 
-## Proposed decision
-1. Publication is deny-by-default and requires a recorded, current, rights-aware editorial policy decision; preserve source attribution, legal uncertainty, approved revision and destination-specific consent. Never assert compliance with Iranian publishing law until human legal/editorial review.
-2. Keep backend output switches `public_analysis`, `studio` (audio/video) and `publishing` (domestic, foreign, public reports) independently scoped and revisioned. Recheck applicable switches **immediately before each side effect**, and again on held-job resumption. Switching public outputs off must not stop ingestion, archiving or confidential EIC reports.
-3. Treat P19's three `executive_private` reports as **structurally not publishable**. They must not be transformable to publication jobs or reach public search, studio, message queues, destination adapters or public object buckets. Enforce this before queueing and again at each sink; a UI-only check is insufficient.
-4. B08 formats **one approved canonical AI/editorial output independently per destination adapter**, without modifying its source or replaying generation centrally. Use destination-scoped idempotency, bounded retry, expiry checks and a blocked/unknown outcome for ambiguous provider acknowledgment; do not cause duplicate messages on retry.
-5. Real destinations (Telegram, Bale, Eitaa, Rubika, WhatsApp Business, other channels) remain disabled until official interfaces, contractual access, credentials, permissions and testing are verified. Unknown Etemad CMS remains a replaceable **mock adapter**.
-6. No external paid model operation, real content publishing or legal assertions are authorized by acceptance of this document alone. Require separate scope-specific authorization and evidence.
+Publishing is the only package that can cause an external, irreversible side effect. The client has not
+authorized real publishing, has no confirmed CMS, and has not approved API rights for destinations.
+Iranian publishing also requires a human legal/editorial signoff that no agent can self-grant.
 
-## Testing and acceptance
-Prove forbidden publication of EIC-private items (including malformed payloads), disabled-switch side-effect suppression, approval/revision invalidation, destination isolation and idempotent retry using mocks before any real integration. Actual test evidence and independent review are required; current status is documentation only.
+## Decision
 
-## Rollback
-Close/revert this ADR PR; keep publishing disabled.
+1. **Three independent output controls** — `public_analysis`, `studio` (audio/video), `publishing`
+   (domestic/foreign/public_reports) — are each enforced **in the backend, before any side effect**.
+   Turning one off must not stop ingestion, archiving, or the three EIC private reports.
+2. **Publishing additionally requires**, in order: a `validation_decision` with `approved`, a recorded
+   reuse-rights status for the source, an explicit destination configuration with `credential_ref`, and
+   the publishing switch on. Any missing element means the job stays `held`.
+3. **Destination adapters default to mock/dry-run.** A real adapter exists only for an officially verified
+   API. Unknown CMS stays an adapter contract; no invented endpoints.
+4. **`executive_private` reports are structurally excluded** from the publishing queue, adapters, public
+   API and object storage paths readable by publish workers. This is enforced at backend, DB/queue and
+   retrieval levels — hiding a button in the UI is not a control.
+5. **Held jobs are not backfilled automatically.** On resume, every held job is revalidated against the
+   current switches and rights before it can proceed.
+6. **Publishing results are recorded** (`publication_result`) including failure reason; retries are
+   idempotent per destination and job id.
+
+## Consequences
+
+- B08 can be fully built and tested with mocks while real publishing stays `BLOCKED`.
+- A reviewer can reject any PR that introduces an adapter call path without the gate checks above.
+- The client must sign off any first real publish, outside the code path.
+
+## Impacted contracts
+
+`output_controls`, `validation_decision`, `publication_job`, `publication_result`, `destination_config`,
+`destination_payload`, `private_report`, `public_report`.
+
+## Open external dependencies
+
+- CMS identity and its official API — BLOCKED.
+- Legal review of republication rights per source — BLOCKED.
+- Credentials for each destination, delivered through a secret store — not in the repo.

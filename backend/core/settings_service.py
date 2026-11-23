@@ -132,6 +132,16 @@ class SettingsService:
         self._grant_lookup = grant_lookup
         self._credential_ref_check = credential_ref_check
 
+    def get_latest(
+        self, contract_name: str, config_id: str, scope: str
+    ) -> ConfigRevision | None:
+        """Return the latest revision for a supported contract, or None."""
+        if contract_name not in _SUPPORTED:
+            raise HTTPException(status_code=400, detail="Unknown config contract")
+        if not all((contract_name, config_id, scope)):
+            raise HTTPException(status_code=400, detail="Invalid config key")
+        return self._store.get(contract_name, config_id, scope)
+
     def update(
         self,
         *,

@@ -1,32 +1,44 @@
-# ADR-002 — ETEMAD interface design system and UI stack
+# ADR-002 — UI design system: shadcn/ui + Tailwind v4 replaces Mantine
 
-- **Status:** Proposed for independent S00 review
-- **Scope:** S00-009 / B09 / P27
-- **References:** `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `source/specs/B09_INTERFACE_TECHNICAL_SPEC.md`, `guides/CLIENT_DECISIONS.md`, `AGENTS.md`
+- **Status:** Accepted
+- **Date:** 2026-11-23
+- **Task:** S00-009
+- **Supersedes:** Mantine references in the v1.1 source documents (B09)
+- **Source:** `source/specs/B09_INTERFACE_TECHNICAL_SPEC.md`, ADR-001
 
-## Context and conflict
+## Context
 
-The earlier B09 technical specification refers to **Mantine**. The subsequent explicit client decision recorded in `guides/CLIENT_DECISIONS.md` selects **React/TypeScript + shadcn/ui + Tailwind CSS v4**, with DTCG-compatible design tokens and accessible UI primitives. The original B09 document remains historical baseline evidence and must not be silently overwritten. The new decision applies to implementation of B09 UI only; backend architecture and frozen wire schemas are unaffected.
+The v1.1 interface documents still name Mantine. The client later chose shadcn/ui + Tailwind v4.
+The code already ships React 19, Vite 6, Tailwind 4 (`frontend/package.json`). Two UI libraries in one
+repository would double the design surface and split component ownership.
 
-## Proposed decision
+## Decision
 
-1. Use React and TypeScript, **shadcn/ui** components and **Tailwind CSS v4** as the base interface toolkit. Use **React Aria where required** for accessible interactions not covered by those primitives. Do not add Mantine to new code.
-2. Define a project-owned **Etemad Editorial Design System** using DTCG-compatible token definitions and mappings. Keep product components independent from any library-specific CSS classes as far as practical; enable reversible migration.
-3. Use Persian-first RTL across dashboards, filters, forms, tables, charts and editor tools, while properly isolating URLs, IDs and other LTR content. Use Vazirmatn only with verified distribution rights and font availability. Adopt Lucide icons, Tiptap editor and TanStack utilities as needed by individual authorized tasks; avoid installing unused libraries.
-4. Use a restrained newspaper-inspired visual language (paper, dark ink, provisional editorial red), but **do not claim official brand conformance**. Logo, official colors, approved assets and usage rights remain pending.
-5. Apply keyboard accessibility, semantic labels, visible focus styles, adequate contrast, responsive navigation, loading/empty/error/forbidden states and reduced motion.
-6. UI hides unauthorized controls for usability but must not be trusted for authorization. P28 enforces server-side role scopes; executive-private reports are never exposed to owner/staff/public search or publishing; output switches are enforced before backend side effects.
+1. **Stack:** React 19 + TypeScript (strict) + Vite + **Tailwind CSS v4** + **shadcn/ui** components,
+   with React Aria primitives where accessibility gaps exist. **No Mantine anywhere.**
+2. **Tokens:** a single design-token layer (DTCG-compatible naming) consumed by Tailwind theme
+   variables. Components read tokens, never raw hex values.
+3. **RTL first:** `dir="rtl"`, `lang="fa"` at the document root; logical CSS properties
+   (`margin-inline`, `inset-inline`) instead of left/right; Persian typography via token, not inline font names.
+4. **Editor:** Tiptap (rich text) and **tables:** TanStack Table, both behind thin wrappers so they can be
+   replaced without touching feature code.
+5. **Brand assets are placeholders.** Official logo, palette and typography are not supplied; the build
+   must render neutral placeholders and keep the asset swap in one module. Do not invent a newspaper logo.
+6. **Accessibility:** every interactive component exposes focus, disabled and error states; contrast
+   checks are part of the component review, not a later pass.
 
-## Alternatives
+## Consequences
 
-- **Mantine**: previously specified; rejected for new B09 implementation due to the more recent client decision, not because of a measured benchmark.
-- Fully custom components: maximum control but higher maintenance and accessibility burden.
-- shadcn/ui + Tailwind v4: selected by client; requires a carefully managed local design-token layer.
+- `frontend/components.json` (S00-060) configures the shadcn generator; component versions are pinned.
+- Any Mantine import is a review failure and can be blocked by lint.
+- The newsroom UI written early (`App.tsx`, `NewsDesk.tsx`) is a demo shell only; it is rewritten against
+  real contracts in G2, not extended.
 
-## Impacts and follow-up
+## Impacted contracts
 
-S00-005 frontend rules and later B09 tasks must follow this ADR once independently accepted. UI snapshots, contrast, keyboard flows, RTL layouts and role-based screens require actual automated/manual checks when executable UI exists. Do not confuse this decision document with an implemented interface or successful build.
+None directly. Indirect: `article`, `public_report`, `image_manifest` rendering in B09.
 
-## Open decisions and rollback
+## Open external dependencies
 
-Obtain official logo/colors/font permissions and confirm relevant version compatibility during scaffolding. Revert this ADR and its dependent UI implementation PRs if the client later approves a different interface stack; leave the original source specification unaltered.
+- Official Etemad brand package (logo, colors, typefaces) — BLOCKED until supplied.
+- Confirmation of the shadcn version against the installed CLI before generator use.

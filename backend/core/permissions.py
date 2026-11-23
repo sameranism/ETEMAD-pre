@@ -1,7 +1,11 @@
 """B01/P28 server-side access decision; no role implies a broad grant."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from threading import Lock
 from uuid import uuid4
 
 from fastapi import HTTPException
@@ -9,6 +13,55 @@ from fastapi import HTTPException
 Role = str
 GrantLookup = Callable[[str, Role, str, str, str], bool]
 _ROLES = frozenset({"owner", "editor_in_chief", "staff"})
+
+
+@dataclass(frozen=True)
+class Grant:
+    principal_id: str
+    role: str
+    resource_type: str
+    resource_id: str
+    action: str
+
+
+class InMemoryGrantStore:
+    """Fixture grant store; phase 1 replaces it with authoritative P28 storage.
+
+    Grants are explicit and additive: absence of a row is a deny.
+    """
+
+    def __init__(self, grants: list[Grant] | None = None) -> None:
+        self._lock = Lock()
+        self._grants: set[Grant] = set(grants or [])
+
+    def grant(self, grant: Grant) -> None:
+        with self._lock:
+            self._grants.add(grant)
+
+    def revoke(self, grant: Grant) -> None:
+        with self._lock:
+            self._grants.discard(grant)
+
+    def lookup(
+        self,
+        principal_id: str,
+        role: Role,
+        resource_type: str,
+        resource_id: str,
+        action: str,
+    ) -> bool:
+        with self._lock:
+            return Grant(principal_id, role, resource_type, resource_id, action) in self._grants
+
+    def __call__(
+        self,
+        principal_id: str,
+        role: Role,
+        resource_type: str,
+        resource_id: str,
+        action: str,
+    ) -> bool:
+        return self.lookup(principal_id, role, resource_type, resource_id, action)
 
 
 def decide_access(

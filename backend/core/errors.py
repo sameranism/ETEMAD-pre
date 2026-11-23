@@ -29,6 +29,7 @@ class ErrorCode(str, Enum):
     NOT_FOUND = "not_found"
     METHOD_NOT_ALLOWED = "method_not_allowed"
     CONFLICT = "conflict"
+    PAYLOAD_TOO_LARGE = "payload_too_large"
     INVALID_STATE = "invalid_state"
     RATE_LIMITED = "rate_limited"
     DEPENDENCY_UNAVAILABLE = "dependency_unavailable"
@@ -42,6 +43,7 @@ _STATUS = {
     ErrorCode.NOT_FOUND: 404,
     ErrorCode.METHOD_NOT_ALLOWED: 405,
     ErrorCode.CONFLICT: 409,
+    ErrorCode.PAYLOAD_TOO_LARGE: 413,
     ErrorCode.INVALID_STATE: 422,
     ErrorCode.RATE_LIMITED: 429,
     ErrorCode.DEPENDENCY_UNAVAILABLE: 503,
@@ -55,11 +57,17 @@ _SAFE_MESSAGES = {
     ErrorCode.NOT_FOUND: "Not found",
     ErrorCode.METHOD_NOT_ALLOWED: "Method not allowed",
     ErrorCode.CONFLICT: "Revision conflict",
+    ErrorCode.PAYLOAD_TOO_LARGE: "Request entity too large",
     ErrorCode.INVALID_STATE: "Invalid state",
     ErrorCode.RATE_LIMITED: "Rate limit exceeded",
     ErrorCode.DEPENDENCY_UNAVAILABLE: "Service unavailable",
     ErrorCode.INTERNAL_ERROR: "Internal server error",
 }
+
+# Starlette status -> API ErrorCode. Anything unlisted becomes a 500 envelope;
+# add the mapping here rather than letting a status silently degrade.
+_HTTP_STATUS_TO_CODE = {code: error for error, code in _STATUS.items()}
+_HTTP_STATUS_TO_CODE[413] = ErrorCode.PAYLOAD_TOO_LARGE
 
 
 class APIError(Exception):
@@ -111,7 +119,11 @@ def error_response(
 
 
 def install_exception_handlers(app: FastAPI) -> None:
-    """Use one stable envelope for known errors and unexpected failures."""
+    """Use one stable envelope for known errors and unexpected failures.
+
+    This must be the only exception-handler installation in the application;
+    adding a second ``Exception`` handler would create a parallel envelope.
+    """
 
     @app.exception_handler(APIError)
     async def api_error(request: Request, exc: APIError) -> JSONResponse:
@@ -130,17 +142,7 @@ def install_exception_handlers(app: FastAPI) -> None:
     async def http_error(
         request: Request, exc: StarletteHTTPException
     ) -> JSONResponse:
-        code = {
-            400: ErrorCode.CONTRACT_INVALID,
-            401: ErrorCode.UNAUTHORIZED,
-            403: ErrorCode.FORBIDDEN,
-            404: ErrorCode.NOT_FOUND,
-            405: ErrorCode.METHOD_NOT_ALLOWED,
-            409: ErrorCode.CONFLICT,
-            422: ErrorCode.INVALID_STATE,
-            429: ErrorCode.RATE_LIMITED,
-            503: ErrorCode.DEPENDENCY_UNAVAILABLE,
-        }.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
+        code = _HTTP_STATUS_TO_CODE.get(exc.status_code, ErrorCode.INTERNAL_ERROR)
         return error_response(code, correlation_id_for(request))
 
     @app.exception_handler(Exception)

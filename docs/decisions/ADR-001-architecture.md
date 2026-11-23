@@ -1,33 +1,50 @@
-# ADR-001 — Architecture and ownership boundaries
+# ADR-001 — Architecture, package boundaries and identifiers
 
-- **Status:** Proposed for independent S00 review (not yet accepted)
-- **Scope:** ETEMAD S00-008 / P01
-- **Baseline:** `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `source/technical/project_package_map.csv`, `source/technical/dependency_edges.csv`, `source/technical/database_dictionary.csv`, baseline contract schemas and examples
-- **Decision authority:** Owner-approved master v1.1; this ADR documents and operationalizes those constraints without changing them.
+- **Status:** Accepted (phase 0 baseline)
+- **Date:** 2026-11-23
+- **Task:** S00-008
+- **Supersedes:** none
+- **Source:** `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `source/technical/project_package_map.csv`, `source/technical/dependency_edges.csv`
 
 ## Context
 
-ETEMAD uses six conceptual layers and nine delivery packages across 29 stable projects. The layers are domestic monitoring, foreign monitoring, content processing, intelligence and reporting, studio and publishing, and central platform. A package is a delivery/ownership boundary, not necessarily a separate server. Implementing one server or service for every package would introduce operational complexity not required by the baseline.
+ETEMAD is an intelligent newsroom for a Persian daily: domestic and foreign monitoring, news processing,
+editorial work, political analysis, audio/video studio, multi-channel publishing, and a role-based dashboard.
+The client requires a non-destructive, incrementally verifiable build: no big-bang integration, no real
+publication, and no external API use before official authorization.
 
-## Proposed decision
+## Decision
 
-1. Keep identifiers **B01–B09** and **P01–P29** stable, with responsibilities and dependencies defined in the baseline project map. B01 owns core data contracts/configuration/source registry/identity/archive/orchestration; B02 domestic ingest; B03 foreign discovery and ingest; B04 normalization/dedup/routing; B05 editorial policy/translation/article/media; B06 analysis/chat/metrics/reports; B07 audio/video; B08 destination scheduling/formatting/sending; B09 Persian RTL interface.
-2. Maintain three **separate environments**, databases and queues: domestic ingest (`etemad_domestic`), foreign ingest (`etemad_foreign`), and central core (`etemad_core`). The central PostgreSQL uses package-owned schemas, not shared ORM writes. Foreign-to-central transfer uses an authenticated, auditable bridge. No direct inter-package database reads or writes; use explicit versioned APIs and events.
-3. Use PostgreSQL as authoritative state, Redis for queues/cache and scoped S3-compatible object storage for large artifacts. Events carry references rather than confidential payloads; follow frozen JSON Schema Draft 2020-12 v1.0 including correlation and idempotency.
-4. Keep the central application modular rather than introducing gratuitous microservices or Kubernetes. Independent workers/adapters may be deployed behind explicit service boundaries as specified. The baseline does **not** authorize collapsing domestic and foreign databases into the core.
-5. Preserve backend-enforced RBAC, the ten-active-human-user limit, separately protected `executive_private` reports for editor-in-chief only, independent `public_analysis`, `studio` and `publishing` output controls, one canonical AI output and destination-local formatting.
-6. Until implementation gates pass, develop with mocks and synthetic fixtures. No production publication, real CMS integration, unverified third-party API or VPS deployment.
+1. **Six conceptual layers**, kept in code as import boundaries:
+   `contracts -> core -> ingest -> processing -> editorial/intelligence -> publish/ui`.
+2. **Nine development packages** B01..B09 and **29 project IDs** P01..P29 are stable identifiers.
+   They may not be renamed, merged, or renumbered without a new ADR.
+3. **Modular monolith for the central core** (B01): one deployable API, internally separated modules.
+   Domestic ingest (B02) and foreign ingest (B03) are *separate deployments* with separate PostgreSQL
+   databases and Redis queues; the foreign-to-central bridge is authenticated HTTPS, not shared DB access.
+4. **All cross-package traffic** uses versioned JSON contracts (API or events). Direct cross-package
+   database reads/writes, ORM sharing, and imports of another package's internals are forbidden.
+5. **PostgreSQL is authoritative**, Redis is transient queue/cache, S3-compatible storage holds
+   large media with scoped ACL. Original source payloads are preserved and never mutated.
+6. **Time is UTC** in storage and transport; `source_country` and `subject_countries` are distinct fields;
+   every record carries provenance and, where applicable, `correlation_id`.
 
 ## Consequences
 
-- Positive: ownership and trust boundaries are explicit; modular core minimizes deployment complexity while preserving isolation.
-- Cost: three data/queue environments and authenticated transfer require operational testing; queue and private-report ACLs are nontrivial.
-- Open items: exact infrastructure sizing and high availability, secret manager, private report isolation design, CMS API, official publishing APIs, legal review and recovery targets must be resolved in their owning tasks. This ADR does not approve those integrations.
+- A task may touch only its declared `TARGET`; a boundary change needs a separate ADR and task.
+- Package isolation is enforced by `tools/check_boundaries.py` and review, not by convention alone.
+- Local development can run the core alone with fixture adapters; ingest runs with mocks.
 
-## Verification and change control
+## Impacted contracts
 
-Validate repository layout against the P/B mapping, dependencies and each contract; verify forbidden cross-database access, private-report leakage and switch behavior before integration. Any changed ownership, edge or wire schema needs a separate scoped ADR/contract migration and consumer tests. Independent Gate-00 review determines acceptance. **This is documentation, not proof of implemented services.**
+`event_envelope`, `workflow_status`, `raw_news`, `normalized_news`, `cluster_result`, `classified_news`,
+`archive_record`, `source_registry`.
 
-## Rollback
+## Open external dependencies
 
-Reject or revert this ADR before merge; preserve the original master specification and schemas unchanged.
+- VPS topology and network policy for the three databases (owner decision).
+- Whether foreign ingest runs on the same host or a separate one (sanctions/proxy constraints).
+
+## Unchanged
+
+`source/contracts/**` and `source/technical/*.sql` remain read-only evidence in this phase.

@@ -1,22 +1,49 @@
-# ADR-003 — Storage ownership and environment isolation
+# ADR-003 — Storage ownership: three PostgreSQL databases, separate queues, scoped object storage
 
-**Status:** Proposed; requires independent S00 acceptance. **Task:** S00-010.
+- **Status:** Accepted (proposal-level; not production DDL)
+- **Date:** 2026-11-23
+- **Task:** S00-010
+- **Source:** `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `source/technical/database_dictionary.csv`,
+  `source/technical/postgres_central_schema_PROPOSAL.sql`, `postgres_domestic_schema_PROPOSAL.sql`,
+  `postgres_foreign_schema_PROPOSAL.sql`
 
-## Sources
-`source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`, `source/technical/database_dictionary.csv`, `source/technical/project_package_map.csv`, `source/technical/dependency_edges.csv`, `AGENTS.md`, and the frozen v1.0 contracts.
+## Context
+
+The architecture separates central processing from domestic and foreign ingestion. The three
+`*.sql` files in `source/technical/` are **proposals** (41 tables total), never executed in production.
+Without an ownership decision, packages start reading each other's tables — the failure mode this ADR
+exists to prevent.
 
 ## Decision
-- Preserve three independent PostgreSQL deployment boundaries: `etemad_domestic` for B02 ingestion, `etemad_foreign` for B03 discovery/ingestion, and `etemad_core` for all central package-owned schemas. Keep ingestion queues independently isolated; Redis is transient cache/queue infrastructure and **never authoritative news storage**.
-- At the center, use database schema/role ownership according to the baseline dictionary: B01 identity/control/sources/archive/orchestration/security, B04 processing, B05 editorial, B06 insights and restricted executive scope, B07 studio, B08 publish, B09 ui. Strictly prohibit cross-package write access and direct cross-package table reads. Use authenticated versioned APIs or events.
-- An authenticated bridge sends foreign events into central processing; no foreign service gets central DB credentials. Preserve idempotency, correlation, source attribution, immutable original material, UTC time and access-scoped payload references.
-- Large media and generated artifacts belong to S3-compatible object storage with scoped ACL and retention policy, not database blobs or publicly accessible buckets. `executive_private` reports require separate database roles and storage/queue/retrieval enforcement; evaluate physically separate private storage before production.
-- Baseline table listings and SQL proposals are **design proposals, not approved DDL**. Never run source SQL directly against production. Migrations and RLS/GRANT policies must be reviewed in their owning tasks, including rollback, data migration and tests.
 
-## Consequences and unresolved
-The three environments add operational complexity but enforce trust and load isolation. Credentials, backup, secret store, RPO/RTO, HA, data retention and final private storage segregation remain open. No VPS deployment or external API is authorized by this ADR.
+1. **Three logical PostgreSQL databases:** `etemad_central`, `etemad_domestic`, `etemad_foreign`.
+   Phase 1 may run all three as separate databases on one server; physical separation is a deployment
+   detail, not a schema permission.
+2. **Schema ownership is exclusive.** A table has exactly one owning package; other packages read it only
+   through a versioned API or an event. No cross-database foreign keys and no cross-database transactions.
+3. **Redis is transient only:** per-stream queues and cache, never the system of record.
+   Queue payloads reference contract records by id.
+4. **Object storage** (S3-compatible) holds raw payloads and media with scoped ACL; the database keeps the
+   reference (`source_payload_ref`, archive record), never the bytes.
+5. **Migrations:** Alembic revisions per database, append-only, reviewed; `001_baseline` is written from the
+   reviewed proposal, not by executing the proposal SQL. Every migration must be reversible and tested on a
+   throwaway database.
+6. **Unapproved SQL must not run** against any environment. The proposal files stay as evidence and are
+   never edited to "make things work".
 
-## Verification
-Later tests must prove package-level grant denial, authenticated foreign bridge, idempotency, retention and leakage prevention. Independent Gate-00 review must check this ADR. **A proposed ADR is not an implemented database.**
+## Consequences
 
-## Rollback
-Close the draft PR without merging; preserve baseline schema files unchanged.
+- Ingest writes to its own database and emits events; the bridge to central is authenticated.
+- Archive (P26) stores identifiers and checksums, not copies of other packages' payloads.
+- Reviewers check the ownership table before approving any new table.
+
+## Impacted contracts
+
+`raw_news`, `normalized_news`, `cluster_result`, `classified_news`, `archive_record`, `source_registry`,
+`event_envelope`, `workflow_status`.
+
+## Open external dependencies
+
+- Host/VPS and backup policy for three databases.
+- Storage provider and sizing for media (audio/video/image).
+- Retention policy and deletion semantics for archived material.
