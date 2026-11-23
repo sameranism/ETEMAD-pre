@@ -2,10 +2,10 @@
 
 ## Current task
 
-- Task: `OPS-002`
-- Branch: `feat/ops-002-merge-guardian`
-- PR: [#44](https://github.com/etemadion/ETEMAD/pull/44)
-- State: PR checks passed. A merge would write to main. Continue isolated work at S09-023.
+- Task: `S09-023`
+- Branch: `feat/s09-023-backend-ci`
+- PR: [#45](https://github.com/etemadion/ETEMAD/pull/45) (draft)
+- State: CI failed after two debug attempts. The remaining findings require changes to existing backend files outside the workflow target.
 
 ## Review and evidence
 
@@ -21,7 +21,7 @@
 ## Isolated follow-on work
 
 - OPS-002 [CI](https://github.com/etemadion/ETEMAD/actions/runs/45277350200) passed. A read-only replay of main commit 7756736 reported PR #43 missing independent approval and returned the expected failure.
-- S09-023 [draft PR #45](https://github.com/etemadion/ETEMAD/pull/45) is isolated from OPS-002. Its [backend CI](https://github.com/etemadion/ETEMAD/actions/runs/45277569283) passed installation, contracts, pytest and report upload. Lint and type-check failed and require code corrections outside its workflow-only target.
+- S09-023: [attempt 1](https://github.com/etemadion/ETEMAD/actions/runs/45279433244) added jsonschema stubs (16 Ruff / 4 mypy findings). [Attempt 2](https://github.com/etemadion/ETEMAD/actions/runs/45279556236) set the repository import root (7 Ruff / 4 mypy findings). Both CI runs failed. Contract validation and all 106 backend tests passed.
 - GitHub listed one collaborator, the PR author's account. The branch protection API returned 403.
 
 ## Baseline
