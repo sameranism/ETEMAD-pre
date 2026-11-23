@@ -4,14 +4,19 @@
 
 - Task: `OPS-002`
 - Branch: `feat/ops-002-merge-guardian`
-- PR: [#44](https://github.com/etemadion/ETEMAD/pull/44) (draft)
-- State: PR CI and eight review fixtures passed. Live main execution and independent approval are pending.
+- PR: [#44](https://github.com/etemadion/ETEMAD/pull/44)
+- State: PR checks passed. A merge would write to main. Continue isolated work at S09-023.
 
 ## Review and evidence
 
 - Second agent reviewed the proposal locally. Its review does not constitute GitHub approval.
 - Local checks passed: 62 manifest targets, relative links, 30 schemas and examples, and package boundaries including two negative fixtures.
 - [OPS-001 PR #43](https://github.com/etemadion/ETEMAD/pull/43) was merged. The ADR remains proposed and Gate-00 remains open.
+
+## Review debt
+
+- OPS-002 / PR #44: self-review with evidence. Diff contains the workflow, ADR and state record. Read-only replay detected the unreviewed PR #43 and the eight reviewer-selection fixtures passed. No independent GitHub approval recorded.
+- OPS-001 / PR #43: GitHub reports merged with no recorded reviews. Gate-00 remains open.
 
 ## Isolated follow-on work
 
