@@ -1,5 +1,11 @@
 # Contract audit - `workflow_status`
 
+## ADR-014 fixture corrective change — 2026-11-26
+
+The owner-authorized [ADR-014](../decisions/ADR-014-workflow-lifecycle.md) merged in [PR #64](https://github.com/sameranism/ETEMAD-pre/pull/64) at `eacb4910967887a011f7c99958d870fc157d869b`. This scoped correction projects actual fixture job state into v1.0, keeps job/workflow/event correlation stable on replay, bounds attempts and deadlines, supports cancellation of non-running jobs and refuses generic publishing execution/resume/retry. Non-publishing resume checks an immutable snapshot and rechecks state and deadline after the callback. The previously erroneous completed-on-enqueue and permissive publish resume assertions are replaced by stronger tests; no other existing test removed. The default three total attempts / 24-hour deadline is fixture policy, not production policy. Existing request_publish remains a switch check, not authorization. No schema, production, permissions or external integration changes.
+
+Preceding [exact-head contract job](https://github.com/sameranism/ETEMAD-pre/actions/runs/45717101645/job/139565850733) reports S00-051 preflight PASS, 62 task preflights, 336 negative cases and boundary PASS. Local clone was previously unavailable (DNS); new tests require exact-head CI and are not asserted as passed here. Durable job leases, restart recovery, authenticated rights/policy/revision checks, in-flight cancellation and full cross-package workflow semantics remain unverified. Gate-00 remains OPEN/BLOCKED.
+
 ## Semantic audit — 2026-11-26
 
 **Current disposition: PARTIAL / BLOCKED.** Independent or human development review is NOT_REQUIRED under [ADR-012](../decisions/ADR-012-automated-acceptance.md). This document records findings, not a wire or runtime change.

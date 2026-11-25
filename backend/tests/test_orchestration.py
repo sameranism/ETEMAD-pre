@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from dataclasses import FrozenInstanceError
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -87,7 +89,7 @@ def test_ingest_archives_and_emits_once(example_dir: Path) -> None:
 
     first = orchestrator.ingest_domestic(record)
     assert first.archived is True
-    assert first.workflow["state"] == "completed"
+    assert first.workflow["state"] == "new"
     assert first.job is not None and first.job.state is JobState.QUEUED
     assert len(deliveries) == 1
 
@@ -95,6 +97,9 @@ def test_ingest_archives_and_emits_once(example_dir: Path) -> None:
     assert second.job is not None and first.job is not None
     assert second.job.job_id == first.job.job_id, "idempotency key must deduplicate"
     assert len(deliveries) == 1, "dedupe key must suppress the second delivery"
+    assert second.workflow == first.workflow
+    assert deliveries[0]["correlation_id"] == first.workflow["correlation_id"]
+    assert len(orchestrator._archive) == 1
 
 
 def test_publish_is_held_while_the_switch_is_off(example_dir: Path) -> None:
@@ -226,8 +231,8 @@ def test_job_lifecycle_and_transitions() -> None:
 
 def test_held_job_requires_revalidation() -> None:
     queue = JobQueue()
-    job = queue.enqueue(kind="publish", idempotency_key="k2")
-    queue.hold(job.job_id, "publishing disabled")
+    job = queue.enqueue(kind="ingest", idempotency_key="k2")
+    queue.hold(job.job_id, "fixture validation required")
     with pytest.raises(InvalidTransition):
         queue.resume(job.job_id, lambda _job: False)
     resumed = queue.resume(job.job_id, lambda _job: True)
@@ -239,6 +244,167 @@ def test_job_attempts_increment_on_start() -> None:
     queue = JobQueue()
     job = queue.enqueue(kind="ingest", idempotency_key="k3")
     assert queue.start(job.job_id).attempt == 1
+
+
+def test_workflow_tracks_job_lifecycle_and_replay(example_dir: Path) -> None:
+    record = _normalized(example_dir)
+    orchestrator = _orchestrator(example_dir, default_off_switches())
+    first = orchestrator.ingest_domestic(record)
+    job = first.job
+    assert job is not None
+    with pytest.raises(InvalidTransition):
+        orchestrator._jobs.complete(job.job_id)
+    orchestrator._jobs.start(job.job_id)
+    running = orchestrator.ingest_domestic(record)
+    assert running.workflow["state"] == "running"
+    assert running.workflow["attempt_count"] == 1
+    orchestrator._jobs.complete(job.job_id)
+    done = orchestrator.ingest_domestic(record)
+    assert done.workflow["state"] == "completed"
+    assert done.workflow["workflow_id"] == first.workflow["workflow_id"]
+    assert done.workflow["correlation_id"] == first.workflow["correlation_id"]
+    validate_payload("workflow_status", done.workflow)
+    with pytest.raises(InvalidTransition):
+        orchestrator._jobs.cancel(job.job_id)
+
+
+def test_distinct_fingerprint_creates_distinct_workflow_and_event(example_dir: Path) -> None:
+    orchestrator = _orchestrator(example_dir, default_off_switches())
+    delivered: list[dict] = []
+    orchestrator._bus.subscribe("news.ingested", delivered.append)
+    record = _normalized(example_dir)
+    first = orchestrator.ingest_domestic(record)
+    second = orchestrator.ingest_domestic(dict(record, fingerprint="sha256:changed"))
+    assert first.workflow["workflow_id"] != second.workflow["workflow_id"]
+    assert first.workflow["correlation_id"] != second.workflow["correlation_id"]
+    assert len(delivered) == 2
+    assert dedupe_key(delivered[0]) != dedupe_key(delivered[1])
+
+
+def test_retry_limit_and_controlled_failure_code() -> None:
+    queue = JobQueue()
+    job = queue.enqueue(kind="ingest", idempotency_key="bounded", max_attempts=2)
+    for attempt in (1, 2):
+        assert queue.start(job.job_id).attempt == attempt
+        failed = queue.fail(job.job_id, "sensitive fixture exception")
+        assert failed.last_error == "job_failed"
+        if attempt == 1:
+            assert queue.retry(job.job_id).attempt == attempt
+    with pytest.raises(InvalidTransition, match="attempt limit"):
+        queue.retry(job.job_id)
+    assert queue.get(job.job_id) == failed
+
+
+@pytest.mark.parametrize("operation", ["start", "retry", "resume"])
+def test_expired_job_cannot_execute(operation: str) -> None:
+    now = datetime(2026, 11, 26, tzinfo=timezone.utc)
+    queue = JobQueue(clock=lambda: now)
+    job = queue.enqueue(kind="ingest", idempotency_key="expiry", deadline_at=now + timedelta(seconds=1))
+    if operation == "retry":
+        queue.start(job.job_id)
+        queue.fail(job.job_id, "fixture")
+    elif operation == "resume":
+        queue.hold(job.job_id, "fixture")
+    before = queue.get(job.job_id)
+    now += timedelta(seconds=1)
+    with pytest.raises(InvalidTransition, match="deadline"):
+        if operation == "resume":
+            queue.resume(job.job_id, lambda _job: True)
+        elif operation == "retry":
+            queue.retry(job.job_id)
+        else:
+            queue.start(job.job_id)
+    assert queue.get(job.job_id) == before
+
+
+def test_invalid_job_bounds_and_immutable_snapshot() -> None:
+    queue = JobQueue()
+    with pytest.raises(ValueError):
+        queue.enqueue(kind="ingest", idempotency_key="bad", max_attempts=0)
+    with pytest.raises(ValueError):
+        queue.enqueue(kind="ingest", idempotency_key="bad", deadline_at=datetime(2026, 11, 26))
+    job = queue.enqueue(kind="ingest", idempotency_key="valid")
+    with pytest.raises(FrozenInstanceError):
+        setattr(job, "state", JobState.DONE)
+    assert queue.get(job.job_id) == job
+    assert queue.enqueue(kind="ingest", idempotency_key="valid") == job
+
+
+@pytest.mark.parametrize("state", ["queued", "held", "failed"])
+def test_cancel_is_terminal(state: str) -> None:
+    queue = JobQueue()
+    job = queue.enqueue(kind="ingest", idempotency_key="cancel")
+    if state == "held":
+        queue.hold(job.job_id, "fixture")
+    elif state == "failed":
+        queue.fail(job.job_id, "fixture")
+    cancelled = queue.cancel(job.job_id)
+    assert cancelled.state is JobState.CANCELLED
+    for operation in (queue.start, queue.retry, queue.cancel, queue.complete):
+        with pytest.raises(InvalidTransition):
+            operation(job.job_id)
+    assert queue.get(job.job_id) == cancelled
+
+
+def test_running_job_cannot_be_cancelled() -> None:
+    queue = JobQueue()
+    job = queue.enqueue(kind="ingest", idempotency_key="running")
+    queue.start(job.job_id)
+    with pytest.raises(InvalidTransition):
+        queue.cancel(job.job_id)
+
+
+def test_held_revalidation_rejects_exception_and_stale_result() -> None:
+    queue = JobQueue()
+    job = queue.enqueue(kind="ingest", idempotency_key="held")
+    held = queue.hold(job.job_id, "fixture")
+
+    def unavailable(_job):
+        raise RuntimeError("fixture validation unavailable")
+
+    with pytest.raises(RuntimeError):
+        queue.resume(job.job_id, unavailable)
+    assert queue.get(job.job_id) == held
+
+    def changed(_job):
+        queue.cancel(job.job_id)
+        return True
+
+    with pytest.raises(InvalidTransition, match="changed"):
+        queue.resume(job.job_id, changed)
+    assert queue.get(job.job_id).state is JobState.CANCELLED
+
+
+def test_resume_rechecks_deadline_after_validation() -> None:
+    now = datetime(2026, 11, 26, tzinfo=timezone.utc)
+    queue = JobQueue(clock=lambda: now)
+    job = queue.enqueue(kind="ingest", idempotency_key="late", deadline_at=now + timedelta(seconds=1))
+    held = queue.hold(job.job_id, "fixture")
+
+    def late(_job):
+        nonlocal now
+        now += timedelta(seconds=1)
+        return True
+
+    with pytest.raises(InvalidTransition, match="deadline"):
+        queue.resume(job.job_id, late)
+    assert queue.get(job.job_id) == held
+
+
+def test_publishing_cannot_start_retry_or_resume_on_generic_queue(example_dir: Path) -> None:
+    orchestrator = _orchestrator(example_dir, _switches(example_dir, publishing=True))
+    queue = orchestrator._jobs
+    job = queue.enqueue(kind="publish", idempotency_key="publish:held")
+    with pytest.raises(InvalidTransition, match="authorized"):
+        queue.start(job.job_id)
+    queue.hold(job.job_id, "fixture")
+    assert orchestrator.request_publish(stream="domestic")["allowed"] is True
+    with pytest.raises(InvalidTransition, match="authorized"):
+        queue.resume(job.job_id, lambda _job: True)
+    assert queue.get(job.job_id).state is JobState.HELD
+    queue.fail(job.job_id, "fixture")
+    with pytest.raises(InvalidTransition, match="authorized"):
+        queue.retry(job.job_id)
 
 
 # --- outbox --------------------------------------------------------------------
