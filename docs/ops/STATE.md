@@ -1,5 +1,12 @@
 # ETEMAD execution state
 
+## Restricted routing remediation — 2026-11-26
+
+- [PR #60](https://github.com/sameranism/ETEMAD-pre/pull/60) merged ADR-013 at signed main [`514c5d6f1be87ac58537fb3b0c1d16a592827599`](https://github.com/sameranism/ETEMAD-pre/commit/514c5d6f1be87ac58537fb3b0c1d16a592827599). Its exact-head [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186755), [contracts](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186800), [bootstrap](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186622), [Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186900), and [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186951) all passed.
+- [Ruleset 28111497](https://github.com/sameranism/ETEMAD-pre/rules/28111497) re-read: extra unattributed-change approval is now false; zero ordinary approvals, strict required checks, native CodeQL, signatures, linear history, squash PRs and no bypass actors retained.
+- Scoped ADR-013 correction in this change: the frozen v1.0 event constructor accepts restricted; shared fixture bus and outbox reject restricted before delivery, deduplication or persistence, and recheck at dispatch. New tests exercise constructor compatibility, unknown version/classification, raw envelopes, idempotency, mutated pending entries and ordinary delivery. No wire schema or existing test changed. Local git access failed (DNS); fresh exact-head CI is required and not claimed here.
+- Gate-00 remains OPEN/BLOCKED; authenticated restricted transport, executive-private routing, remaining semantic audits and permission/secret checks are not accepted. Gate-01 and allowed-source prerequisites remain open; S03-006 not started. No production use or external services authorized.
+
 ## Verified checkpoint — 2026-11-26 (Asia/Tehran), baseline `d1d773db8038ab3ac4b06f6c54ac450a2158ced7`
 
 - [PR #58](https://github.com/sameranism/ETEMAD-pre/pull/58) is merged at [signed main commit](https://github.com/sameranism/ETEMAD-pre/commit/d1d773db8038ab3ac4b06f6c54ac450a2158ced7). The exact-head [bootstrap check](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713010755), [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713010676), [contracts](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713010784) and [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713010804) report success.

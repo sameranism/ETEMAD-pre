@@ -13,7 +13,14 @@ from backend.core.archive import (
     build_archive_record,
     object_key,
 )
-from backend.core.events import InMemoryEventBus, dedupe_key, make_event
+from backend.core.contracts import ContractError, validate_payload
+from backend.core.events import (
+    InMemoryEventBus,
+    RestrictedEventRoutingError,
+    UnknownClassification,
+    dedupe_key,
+    make_event,
+)
 from backend.core.health import health_report
 from backend.core.jobs import InvalidTransition, JobQueue, JobState
 from backend.core.object_store import InvalidObjectKey, LocalObjectStore
@@ -102,6 +109,106 @@ def test_publish_is_allowed_when_the_switch_is_on(example_dir: Path) -> None:
     orchestrator = _orchestrator(example_dir, _switches(example_dir, publishing=True))
     decision = orchestrator.request_publish(stream="domestic")
     assert decision["allowed"] is True
+
+
+# --- event envelope and restricted routing (ADR-013) ----------------------------
+
+
+def _event(classification: str = "internal") -> dict:
+    return make_event(
+        event_type="news.ingested",
+        producer_project="P07",
+        object_id="n-1",
+        correlation_id="corr-1",
+        payload_ref="archive/n-1.json",
+        classification=classification,
+    )
+
+
+@pytest.mark.parametrize("classification", ["public", "internal", "restricted", "executive_private"])
+def test_event_constructor_matches_frozen_classification_enum(classification: str) -> None:
+    event = _event(classification)
+    assert event["classification"] == classification
+    assert event["schema_version"] == "1.0"
+    assert event["payload_ref"] == "archive/n-1.json"
+    validate_payload("event_envelope", event)
+
+
+def test_event_constructor_rejects_unknown_classification() -> None:
+    with pytest.raises(UnknownClassification):
+        _event("unknown")
+
+
+def test_restricted_event_cannot_consume_shared_bus_idempotency_key() -> None:
+    bus = InMemoryEventBus()
+    delivered: list[dict] = []
+    bus.subscribe("news.ingested", delivered.append)
+    event = _event()
+    # Simulate a valid envelope received directly, not via the constructor.
+    restricted = dict(event, classification="restricted")
+    validate_payload("event_envelope", restricted)
+    with pytest.raises(RestrictedEventRoutingError) as rejected:
+        bus.publish(restricted)
+    assert restricted["payload_ref"] not in str(rejected.value)
+    assert delivered == []
+    assert bus.deliveries() == set()
+    bus.publish(event)
+    bus.publish(event)
+    assert delivered == [event]
+    assert bus.deliveries() == {dedupe_key(event)}
+
+
+def test_restricted_event_cannot_enter_generic_outbox() -> None:
+    outbox = Outbox()
+    restricted = dict(_event(), classification="restricted")
+    validate_payload("event_envelope", restricted)
+    with pytest.raises(RestrictedEventRoutingError) as rejected:
+        outbox.append(restricted)
+    assert restricted["payload_ref"] not in str(rejected.value)
+    assert len(outbox) == 0
+    assert outbox.pending() == []
+    assert outbox.keys() == set()
+
+
+def test_outbox_rechecks_classification_before_dispatch() -> None:
+    outbox = Outbox()
+    entry = outbox.append(_event())
+    entry.event["classification"] = "restricted"
+    delivered: list = []
+    with pytest.raises(RestrictedEventRoutingError):
+        outbox.dispatch(delivered.append)
+    assert delivered == []
+    assert entry.dispatched_at is None
+    assert outbox.pending() == [entry]
+
+
+@pytest.mark.parametrize("classification", ["public", "internal"])
+def test_ordinary_events_keep_shared_delivery_and_deduplication(classification: str) -> None:
+    event = _event(classification)
+    bus = InMemoryEventBus()
+    delivered: list[dict] = []
+    bus.subscribe("news.ingested", delivered.append)
+    outbox = Outbox()
+    outbox.append(event)
+    assert outbox.dispatch(bus.publish) == 1
+    assert outbox.dispatch(bus.publish) == 0
+    bus.publish(event)
+    assert delivered == [event]
+
+
+def test_shared_routes_reject_unknown_wire_version_without_side_effects() -> None:
+    event = dict(_event(), schema_version="2.0")
+    bus = InMemoryEventBus()
+    delivered: list[dict] = []
+    bus.subscribe("news.ingested", delivered.append)
+    outbox = Outbox()
+    with pytest.raises(ContractError):
+        bus.publish(event)
+    with pytest.raises(ContractError):
+        outbox.append(event)
+    assert delivered == []
+    assert bus.deliveries() == set()
+    assert len(outbox) == 0
 
 
 # --- jobs ----------------------------------------------------------------------
