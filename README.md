@@ -3,21 +3,7 @@
 > **Status: pre-release, not operational.** Contract layer and foundation are under construction.
 > Nothing in this repository publishes, fetches live sources, or calls external AI by default.
 
-## What exists today
-
-- `backend/` — FastAPI scaffold: health, safe error envelope, contract loading, permission decisions,
-  versioned settings service. Five of thirty foundation tasks are present.
-- `frontend/` — React 19 + Vite 6 + Tailwind 4 demo shell (newsroom list). Synthetic data only.
-- `source/contracts/` — **30 JSON Schema (Draft 2020-12, `schema_version` 1.0) with 30 examples.**
-  These are the authority; product code must conform to them.
-- `docs/decisions/` — ADR-001 .. ADR-006 (architecture, UI stack, storage, publishing gates, roles, AI gateway).
-- `tools/validate_contracts.py` — validates every schema and example; exit 1 on any violation.
-- `tools/preflight.py` — blocks a task when its required attachments or contracts are missing.
-- `.cursor/rules/` + `AGENTS.md` — binding rules for coding agents.
-
-## Contracts are read-only evidence
-
-Never edit a schema or example to make code pass. A required field, enum or semantic change needs a new
+##  semantic change needs a new
 ADR, a version bump and producer/consumer tests.
 
 ## Local checks
