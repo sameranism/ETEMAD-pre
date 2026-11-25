@@ -2,6 +2,22 @@
 
 ## Current checkpoint — 2026-11-26 (Asia/Tehran)
 
+- [PR #56](https://github.com/sameranism/ETEMAD-pre/pull/56) merged
+  `887e83f3609da993e75725538f5a93255031de30` as
+  `e297b5f9de301e4d07ac108d808615e6e14a6cb7`, adopting ADR-012 and
+  automatic development acceptance. [Post-merge Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711967375)
+  and [CodeQL on main](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711967167)
+  passed. Personal review for new development is NOT_REQUIRED under repository policy.
+- Current evidence change (S09-023 follow-up): add fixture PostgreSQL to GitHub
+  backend CI and run the full backend suite against its disposable test databases.
+  Locally, PostgreSQL 19.0 on loopback gave 140 passed, including migration
+  upgrade/downgrade/re-upgrade with central and domestic database separation.
+  The CI test uses PostgreSQL 18. No foreign migration exists in this chain.
+- The Gate-00 semantic audit reproduced a v1.0 producer mismatch for
+  `event_envelope.classification=restricted`. Record exact contract
+  and routing evidence before changing producer behavior. The approved
+  source list remains a downstream prerequisite for S03-006.
+
 - Canonical repository: [sameranism/ETEMAD-pre](https://github.com/sameranism/ETEMAD-pre), protected `main`.
 - Security maintenance [PR #55](https://github.com/sameranism/ETEMAD-pre/pull/55)
   squash merged head `66c40b443413926a90feccac9d4d627fd1516644` as

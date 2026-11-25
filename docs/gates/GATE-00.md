@@ -11,6 +11,10 @@ and [ADR-012](../decisions/ADR-012-automated-acceptance.md).
 | Native default-branch protection | PASS for CI, signed squash PRs, CodeQL, deletion and force-push prevention | [Active Ruleset 28111497](https://github.com/sameranism/ETEMAD-pre/rules/28111497); extra unattributed-change approval remains configured at this observation |
 | Phase-zero inventory and preflight | PASS locally | `python tools/check_gate00.py`, exit 0, 62/62 tracked targets, prompts and preflights |
 | Frozen schema hashes and positive and negative schema checks | PASS locally | Same command, 30 positive schema/example pairs and 336 rejected negative cases |
+| Automated policy and exact-head CI | PASS | [PR #56](https://github.com/sameranism/ETEMAD-pre/pull/56), head `887e83f3609da993e75725538f5a93255031de30`; [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711659707), [contract and foundation checks](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711659482), [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711659447), [main provenance audit](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711967375) |
+| Fixture authorization and orchestration | PASS locally | `python -m pytest -q backend/tests/test_security.py backend/tests/test_orchestration.py`, exit 0, 41 passed |
+| Central and domestic migration round trip | PASS on local PostgreSQL 19.0 | `python -m pytest -q backend/tests` with ephemeral loopback `ETEMAD_TEST_PG_ADMIN_URL`, 140 passed including the migration check. Separate foreign database verified untouched; no foreign migration was run |
+| Frontend build | PASS locally | `npm run build`. `npm test` exited 1 because the repository had no matching tests; frontend behavior remains unverified |
 | Import boundaries | PASS locally and in PR #55 CI | `python tools/check_boundaries.py --self-test` and `python tools/check_boundaries.py`, both exit 0; two deliberately invalid fixture dependencies detected |
 
 The phase-zero table below records what the foundation check exercised. Historical
@@ -24,10 +28,14 @@ column was pending for every task.
   and workflow state transitions in [workflow_status](../contract-audits/workflow_status.md).
   The example and negative schema check covers structure. Cross-record uniqueness,
   legal state transitions and privacy across downstream services require separate tests.
+  On the accepted baseline `e297b5f9`, a local fixture call to `backend.core.events.make_event`
+  with `classification="restricted"` raised `UnknownClassification` (exit 1).
+  The frozen `event_envelope` enum includes `restricted`. Record a compatible
+  producer/consumer policy and test routing and authorization before marking S00-035 complete.
 - Record applicable secret and permission scan evidence, and run failure-path tests
   for unauthorized private data access across the backend, storage and retrieval boundaries.
-- Record exact-head CI for the acceptance change and exercise Merge Guardian's new
-  trusted PR mode and push audit on GitHub. The old runs retain their conclusions.
+- Use the new main-push audit recorded above. Verify the trusted base check
+  on a subsequent PR. The old runs retain their original conclusions.
 
 ## Downstream entry criteria
 
