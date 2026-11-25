@@ -17,6 +17,7 @@ from backend.core.archive import (
 )
 from backend.core.contracts import ContractError, validate_payload
 from backend.core.events import (
+    ExecutivePrivateEventRoutingError,
     InMemoryEventBus,
     RestrictedEventRoutingError,
     UnknownClassification,
@@ -182,6 +183,60 @@ def test_outbox_rechecks_classification_before_dispatch() -> None:
     delivered: list = []
     with pytest.raises(RestrictedEventRoutingError):
         outbox.dispatch(delivered.append)
+    assert delivered == []
+    assert entry.dispatched_at is None
+    assert outbox.pending() == [entry]
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_private_event_cannot_consume_shared_bus_idempotency_key(raw: bool) -> None:
+    bus = InMemoryEventBus()
+    delivered: list[dict] = []
+    bus.subscribe("news.ingested", delivered.append)
+    ordinary = _event()
+    private = (
+        dict(ordinary, classification="executive_private")
+        if raw
+        else _event("executive_private")
+    )
+    validate_payload("event_envelope", private)
+    with pytest.raises(ExecutivePrivateEventRoutingError) as rejected:
+        bus.publish(private)
+    assert private["payload_ref"] not in str(rejected.value)
+    assert private["object_id"] not in str(rejected.value)
+    assert delivered == []
+    assert bus.deliveries() == set()
+    bus.publish(ordinary)
+    bus.publish(ordinary)
+    assert delivered == [ordinary]
+    assert bus.deliveries() == {dedupe_key(ordinary)}
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_private_event_cannot_enter_generic_outbox(raw: bool) -> None:
+    outbox = Outbox()
+    private = (
+        dict(_event(), classification="executive_private")
+        if raw
+        else _event("executive_private")
+    )
+    validate_payload("event_envelope", private)
+    with pytest.raises(ExecutivePrivateEventRoutingError) as rejected:
+        outbox.append(private)
+    assert private["payload_ref"] not in str(rejected.value)
+    assert len(outbox) == 0
+    assert outbox.pending() == []
+    assert outbox.keys() == set()
+
+
+def test_outbox_rechecks_private_classification_before_dispatch() -> None:
+    outbox = Outbox()
+    entry = outbox.append(_event())
+    entry.event["classification"] = "executive_private"
+    delivered: list = []
+    with pytest.raises(ExecutivePrivateEventRoutingError) as rejected:
+        outbox.dispatch(delivered.append)
+    assert entry.event["payload_ref"] not in str(rejected.value)
     assert delivered == []
     assert entry.dispatched_at is None
     assert outbox.pending() == [entry]
