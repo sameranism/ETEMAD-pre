@@ -4,7 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths: ['.github/workflows/merge-guardian.yml']
+    types: [opened, reopened, synchronize, ready_for_review]
+  pull_request_review:
+    types: [submitted, dismissed]
 
 permissions:
   contents: read
@@ -40,11 +42,28 @@ jobs:
               pages = json.loads(command("gh", "api", "--paginate", "--slurp", path))
               return [item for page in pages for item in page]
 
+          ROUTINE_FILES = {
+              'backend/modules/processing/classifier.py',
+              'backend/modules/processing/deduplicator.py',
+              'backend/modules/processing/extractor.py',
+              'backend/modules/processing/normalizer.py',
+              'frontend/src/styles/globals.css',
+          }
+
+          def sensitive(files, count):
+              if not files or len(files) != count:
+                  return True
+              return any(item.get('filename') not in ROUTINE_FILES
+                         or (item.get('previous_filename') is not None
+                             and item['previous_filename'] not in ROUTINE_FILES)
+                         for item in files)
+
           def reviewer_approved(pr, reviews):
               latest_decisions = {}
               for review in sorted(reviews, key=lambda item: item["id"]):
                   login = review["user"]["login"]
-                  if login.casefold() == pr["user"]["login"].casefold():
+                  if (review["user"].get("type") != "User"
+                          or login.casefold() == pr["user"]["login"].casefold()):
                       continue
                   if review["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
                       latest_decisions[login.casefold()] = review
@@ -56,22 +75,45 @@ jobs:
               )
 
           pr = {"user": {"login": "author"}, "head": {"sha": "head"}}
-          approval = {"id": 1, "user": {"login": "reviewer"}, "state": "APPROVED",
+          approval = {"id": 1, "user": {"login": "reviewer", "type": "User"}, "state": "APPROVED",
                       "commit_id": "head", "author_association": "COLLABORATOR"}
           assert reviewer_approved(pr, [approval])
           assert not reviewer_approved(pr, [])
-          assert not reviewer_approved(pr, [approval | {"user": {"login": "AUTHOR"}}])
+          assert not reviewer_approved(pr, [approval | {"user": {"login": "AUTHOR", "type": "User"}}])
+          assert not reviewer_approved(pr, [approval | {"user": {"login": "bot", "type": "Bot"}}])
           assert not reviewer_approved(pr, [approval | {"commit_id": "stale"}])
           assert not reviewer_approved(pr, [approval | {"author_association": "NONE"}])
           for state in ("CHANGES_REQUESTED", "DISMISSED"):
               assert not reviewer_approved(pr, [approval, approval | {"id": 2, "state": state}])
           assert reviewer_approved(pr, [approval, approval | {"id": 2, "state": "COMMENTED"}])
-          print("Review selection fixtures: 8 passed")
-
-          if os.environ["EVENT"] != "push":
-              raise SystemExit(0)
+          print("Review selection fixtures: 9 passed")
+          ordinary = {"filename": "backend/modules/processing/classifier.py"}
+          assert not sensitive([ordinary], 1)
+          assert sensitive([], 0)
+          assert sensitive([ordinary], 2)
+          assert sensitive([ordinary | {"previous_filename": "backend/core/auth.py"}], 1)
+          assert sensitive([{"filename": ".github/workflows/merge-guardian.yml"}], 1)
+          print("Scope classification fixtures: 5 passed")
 
           repo = os.environ["GH_REPO"]
+
+          def required_review(pr):
+              files = api(f"repos/{repo}/pulls/{pr['number']}/files")
+              if not sensitive(files, pr["changed_files"]):
+                  return "NOT_REQUIRED"
+              reviews = api(f"repos/{repo}/pulls/{pr['number']}/reviews")
+              return "PASS" if reviewer_approved(pr, reviews) else "MISSING"
+
+          if os.environ["EVENT"] != "push":
+              with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as handle:
+                  number = json.load(handle)["pull_request"]["number"]
+              pr = json.loads(command("gh", "api", f"repos/{repo}/pulls/{number}"))
+              verdict = required_review(pr)
+              print(f"Independent review: {verdict}")
+              if verdict == "MISSING":
+                  raise SystemExit("Sensitive change requires independent current-head approval")
+              raise SystemExit(0)
+
           before, after = os.environ["BEFORE"], os.environ["AFTER"]
           subprocess.run(["git", "merge-base", "--is-ancestor", before, after], check=True)
           commits = command("git", "rev-list", "--first-parent", f"{before}..{after}").split()
@@ -86,14 +128,13 @@ jobs:
                                  and item["base"]["ref"] == "main"
                                  and item["base"]["repo"]["full_name"] == repo), None)
                   number = merged["number"] if merged else None
-                  approved = bool(merged and reviewer_approved(
-                      merged, api(f"repos/{repo}/pulls/{number}/reviews")
-                  ))
+                  pr = (json.loads(command("gh", "api", f"repos/{repo}/pulls/{number}"))
+                        if merged else None)
                   ref = f"#{number}" if number else "—"
-                  verdict = "Pass" if approved else "Missing"
+                  verdict = required_review(pr) if pr else "MISSING_PR"
                   print(f"| `{sha[:12]}` | {ref} | {verdict} |", file=summary)
-                  if not approved:
+                  if verdict not in {"PASS", "NOT_REQUIRED"}:
                       missing.append(sha)
           if missing:
-              raise SystemExit(f"No independent approval on current PR head for {len(missing)} main commit(s)")
+              raise SystemExit(f"Missing PR provenance or required independent approval for {len(missing)} main commit(s)")
           PY

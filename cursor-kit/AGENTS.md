@@ -5,6 +5,9 @@
 - Task prompt identifies the allowed files. Do not edit other files or contracts; if impossible, report the exact blocker and request a separate task/ADR.
 - This repo uses 6 conceptual layers, 9 packages B01..B09, 29 projects P01..P29; IDs do not change.
 
+## Routine development and Gate control
+- Follow the repository root `AGENTS.md` and `docs/decisions/ADR-011-single-owner-development.md`. Routine fixture-only tasks use scoped PRs and actual successful checks without mandatory human approval; sensitive changes retain explicit authorization and independent review. Gate and release evidence requirements remain unchanged. Never push directly to main or force-push.
+
 ## Non-destructive modular development
 - Prefer a small stable core and independently testable feature modules with minimal dependencies.
 - Versioned JSON Schema Draft 2020-12 v1.0 is the data contract. Never silently change a required field/enum/semantics; preserve old examples.
