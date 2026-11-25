@@ -1,6 +1,6 @@
-# GATE-00 — بازبینی مستقل مرحله 0
+# GATE-00 — پذیرش خودکار مرحله 0
 
-**مدل:** Codex (در محیط جدا از نویسندگان؛ اجرا با PR read-only، مگر تسک اصلاح مستقل تصویب شود).
+**سیاست:** پذیرش خودکار بر پایهٔ [ADR-012](../../docs/decisions/ADR-012-automated-acceptance.md).
 
 ## ورودی‌های لازم
 - `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`
@@ -9,9 +9,14 @@
 - `manifests/tasks.csv`
 - لاگ واقعی CI، گزارش PR و تغییرات Git برای همین مرحله.
 
-## پرامپت آماده
+## روش ثبت پذیرش
 
-Act as an independent ETEMAD architecture, security and contract reviewer for phase 0 — مرحله صفر: قفل قرارداد و قوانین. Review ONLY the diff for tasks listed below. Read referenced master/package specs and source JSON Schemas. Check that edits obey allowed-file boundaries, cross-package API isolation, data provenance, 3-DB separation, EIC private isolation, output switches, model/branding placeholders, verified adapter status, and actual test evidence. Never accept statements of success without logs. Do not edit code in review run. Return a table: task ID, changed files, test evidence, security/contract findings, PASS/FAIL/BLOCKED, required patch task; finish with a gate decision. If test tools unavailable, mark UNKNOWN not PASS. Reject any unauthorized public/private publication path or real API use.
+Run ETEMAD architecture, security and contract acceptance checks for phase 0 — مرحله صفر: قفل قرارداد و قوانین. Use the listed tasks and their applicable test and security criteria. Match every check to the current PR head or exact accepted integration revision. Read referenced master/package specs and source JSON Schemas. Check that edits obey allowed-file boundaries, cross-package API isolation, data provenance, 3-DB separation, EIC private isolation, output switches, model/branding placeholders, verified adapter status, and actual test evidence. Never accept statements of success without logs. Record commands, exit codes, workflow links and the exact SHA. For missing evidence mark the affected item BLOCKED and run or implement its check in the appropriate scope. Return a table: task ID, changed files, test evidence, security/contract findings, PASS/FAIL/BLOCKED, required patch task; finish with a gate decision. If test tools unavailable, mark UNKNOWN not PASS. Reject any unauthorized public/private publication path or real API use.
+
+## کنترل پایه تکرارپذیر
+- `python tools/check_gate00.py` موجودی ۶۲ تسک و پیوست‌ها، اثر انگشت ۳۰ قرارداد و آزمون‌های ساختاری مثبت و منفی را بررسی می‌کند. در مسیر CI قرارداد اجرا می‌شود.
+- `python tools/check_boundaries.py --self-test` و `python tools/check_boundaries.py` مرز معماری را بررسی می‌کنند.
+- وضعیت نهایی از [دفتر شواهد](../../docs/gates/GATE-00.md) خوانده می‌شود. در نتیجهٔ نهایی شواهد ممیزی معنایی، کنترل محرمانگی و مجوز و اجرای واقعی CI باید برای همان نسخه درج شوند.
 
 ## تسک‌های این مرحله
 - `S00-001` → `AGENTS.md` — قواعد پایه عامل‌ها
@@ -79,4 +84,4 @@ Act as an independent ETEMAD architecture, security and contract reviewer for ph
 
 ## خروجی
 - گزارش تصمیم Gate با شواهد، خطاها، فایل‌های مغایر و تسک‌های اصلاح.
-- بدون ادغام/استقرار خودکار.
+- ادغام فقط از مسیر PR حفاظت‌شده پس از موفقیت کنترل‌های الزامی و احراز پیش‌نیازها. اجرای عملیاتی نیازمند مجوز جداگانه است.

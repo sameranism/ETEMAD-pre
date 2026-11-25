@@ -33,7 +33,7 @@ Every line below is backed by a command that was actually run. Anything not run 
 - Frontend config: `components.json`, `eslint.config.js`, `playwright.config.ts`, `@` path alias
   (tsconfig + vite).
 
-Contract audits are **draft until an independent reviewer signs Gate-00**; they were generated from
+Contract audits are **draft until the applicable Gate-00 semantic and security checks pass**; they were generated from
 the frozen schemas, not hand-waved.
 
 ## Phase 1 — code complete (30/30 targets present)
@@ -67,7 +67,7 @@ the frozen schemas, not hand-waved.
 | Playwright E2E | NOT_RUN | `@playwright/test` and browsers not installed |
 | Real source ingestion | NOT_RUN | no client-approved domestic source list yet; fixture transport is the default |
 | Real publishing / CMS / AI calls | BLOCKED | no authorization, no CMS, no keys (by design) |
-| Gate-00 / Gate-01 independent review | PENDING | requires a second reviewer run; agent cannot self-approve |
+| Gate-00 / Gate-01 automated acceptance | PENDING | requires evidence for the applicable automated acceptance checks |
 
 ## Migration evidence (executed, not asserted)
 

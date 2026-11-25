@@ -1,140 +1,184 @@
-"""Regression fixtures for the trusted merge policy; no network or real tokens."""
+"""Regression fixtures for automated merge controls; all GitHub calls are mocked."""
 
 import copy
 from unittest.mock import Mock
 
 import pytest
 
-from tools.merge_guardian import evaluate, event_revision, reviewer_approved, run_pr, sensitive
+from tools import merge_guardian as guardian
 
 REPO = "owner/repo"
 A = "a" * 40
 B = "b" * 40
 ORDINARY = {"filename": "backend/modules/processing/classifier.py", "status": "modified"}
-SENSITIVE = {"filename": ".github/workflows/merge-guardian.yml", "status": "modified"}
+POLICY = {"filename": ".github/workflows/merge-guardian.yml", "status": "modified"}
 
 
-def pr(sha=A):
+def pr(sha=A, *, head_repo=REPO):
     return {
         "number": 3,
-        "head": {"sha": sha},
+        "head": {"sha": sha, "repo": {"full_name": head_repo}},
         "base": {"ref": "main", "sha": "c" * 40, "repo": {"full_name": REPO}},
         "changed_files": 1,
         "state": "open",
         "draft": False,
-        "user": {"login": "author"},
+        "merged_at": None,
+        "merge_commit_sha": None,
     }
 
 
-def approval(sha=A):
-    return {
-        "id": 1, "user": {"login": "reviewer", "type": "User"},
-        "state": "APPROVED", "commit_id": sha, "author_association": "COLLABORATOR",
-    }
+def rules():
+    return [
+        *({"type": name} for name in guardian.REQUIRED_RULES),
+        {"type": "pull_request", "parameters": {"allowed_merge_methods": ["squash"]}},
+        {"type": "required_status_checks", "parameters": {
+            "strict_required_status_checks_policy": True,
+            "required_status_checks": [{"context": name} for name in guardian.REQUIRED_CHECKS],
+        }},
+        {"type": "code_scanning", "parameters": {"code_scanning_tools": [{
+            "tool": "CodeQL", "alerts_threshold": "all", "security_alerts_threshold": "all",
+        }]}},
+    ]
 
 
-def test_routine_needs_no_human():
-    reviews = Mock()
-    assert evaluate(lambda: pr(), lambda: [ORDINARY], reviews, A, REPO) == "NOT_REQUIRED"
-    reviews.assert_not_called()
+def test_protection_accepts_native_checks():
+    guardian.verify_protection(rules())
 
 
-@pytest.mark.parametrize("files,count", [
-    ([], 0), ([ORDINARY], 2), ([SENSITIVE], 1),
-    ([ORDINARY | {"status": "renamed", "previous_filename": "backend/core/auth.py"}], 1),
-    ([ORDINARY | {"status": "removed"}], 1),
+@pytest.mark.parametrize("removed", [
+    "deletion", "non_fast_forward", "required_signatures", "required_linear_history",
+    "pull_request", "required_status_checks", "code_scanning",
 ])
-def test_sensitive_paths_fail_closed(files, count):
-    assert sensitive(files, count)
+def test_protection_rejects_missing_rule(removed):
+    with pytest.raises(ValueError):
+        guardian.verify_protection([rule for rule in rules() if rule["type"] != removed])
 
 
-@pytest.mark.parametrize("review", [
-    approval(B),
-    approval() | {"user": {"login": "AUTHOR", "type": "User"}},
-    approval() | {"user": {"login": "bot", "type": "Bot"}},
-    approval() | {"author_association": "NONE"},
+def test_protection_rejects_loose_checks():
+    policy = rules()
+    policy[-2]["parameters"]["strict_required_status_checks_policy"] = False
+    with pytest.raises(ValueError, match="up-to-date"):
+        guardian.verify_protection(policy)
+
+
+def test_protection_rejects_weaker_codeql_threshold():
+    policy = rules()
+    policy[-1]["parameters"]["code_scanning_tools"][0]["security_alerts_threshold"] = "high"
+    with pytest.raises(ValueError, match="CodeQL"):
+        guardian.verify_protection(policy)
+
+
+@pytest.mark.parametrize("files,head_repo", [([ORDINARY], "other/fork"), ([POLICY], REPO)])
+def test_exact_head_has_pr_provenance(files, head_repo):
+    guardian.evaluate(lambda: pr(head_repo=head_repo), lambda: files, A, REPO)
+
+
+@pytest.mark.parametrize("files", [[], [ORDINARY, POLICY], [ORDINARY, ORDINARY]])
+def test_incomplete_file_provenance_is_rejected(files):
+    with pytest.raises(ValueError, match="file provenance"):
+        guardian.evaluate(pr, lambda: files, A, REPO)
+
+
+@pytest.mark.parametrize("file", [
+    POLICY, ORDINARY | {"previous_filename": POLICY["filename"], "status": "renamed"},
 ])
-def test_unqualified_review(review):
-    assert not reviewer_approved(pr(), [review])
-
-
-def test_sensitive_current_review():
-    assert evaluate(lambda: pr(), lambda: [SENSITIVE], lambda: [approval()], A, REPO) == "PASS"
-
-
-def test_sensitive_missing_review():
-    assert evaluate(lambda: pr(), lambda: [SENSITIVE], lambda: [], A, REPO) == "MISSING"
+def test_fork_cannot_change_control_paths(file):
+    with pytest.raises(ValueError, match="must originate"):
+        guardian.evaluate(lambda: pr(head_repo="other/fork"), lambda: [file], A, REPO)
 
 
 def test_head_drift_before_evaluation():
     files = Mock()
     with pytest.raises(ValueError, match="revision"):
-        evaluate(lambda: pr(B), files, Mock(), A, REPO)
+        guardian.evaluate(lambda: pr(B), files, A, REPO)
     files.assert_not_called()
 
 
 def test_head_drift_during_evaluation():
     with pytest.raises(ValueError, match="changed"):
-        evaluate(Mock(side_effect=[pr(), pr(B)]), lambda: [SENSITIVE],
-                 lambda: [approval()], A, REPO)
-
-
-def test_head_drift_at_final_check():
-    with pytest.raises(ValueError, match="changed"):
-        evaluate(Mock(side_effect=[pr(), pr(), pr(B)]), lambda: [SENSITIVE],
-                 lambda: [approval()], A, REPO)
+        guardian.evaluate(Mock(side_effect=[pr(), pr(B)]), lambda: [POLICY], A, REPO)
 
 
 def test_base_drift_during_evaluation():
     changed = copy.deepcopy(pr())
     changed["base"]["sha"] = B
     with pytest.raises(ValueError, match="changed"):
-        evaluate(Mock(side_effect=[pr(), changed]), lambda: [ORDINARY], Mock(), A, REPO)
+        guardian.evaluate(Mock(side_effect=[pr(), changed]), lambda: [ORDINARY], A, REPO)
 
 
-def test_review_dismissed_during_evaluation():
-    reviews = Mock(side_effect=[[approval()], [approval() | {"state": "DISMISSED"}]])
-    with pytest.raises(ValueError, match="Reviews changed"):
-        evaluate(lambda: pr(), lambda: [SENSITIVE], reviews, A, REPO)
+def test_draft_cannot_pass():
+    with pytest.raises(ValueError, match="ready"):
+        guardian.evaluate(lambda: pr() | {"draft": True}, lambda: [ORDINARY], A, REPO)
 
 
-def test_eligible_objection_blocks_approval():
-    objection = approval() | {"id": 2, "state": "CHANGES_REQUESTED",
-                             "user": {"login": "other", "type": "User"}}
-    assert not reviewer_approved(pr(), [approval(), objection])
-
-
-def test_event_revision_uses_original_payload():
-    assert event_revision("pull_request_target", {"pull_request": pr()}) == (3, A)
-    with pytest.raises(ValueError, match="Untrusted"):
-        event_revision("pull_request_review", {})
-
-
-def test_recheck_requires_exact_sha_and_eligible_user():
-    payload = {"issue": {"number": 3, "pull_request": {}},
-               "comment": {"body": f"/guardian-recheck {A}",
-                           "author_association": "OWNER", "user": {"type": "User"}}}
-    assert event_revision("issue_comment", payload) == (3, A)
-    payload["comment"]["author_association"] = "NONE"
-    assert event_revision("issue_comment", payload) is None
+def test_audit_requires_the_actual_merge_commit():
+    merged = pr() | {"state": "closed", "merged_at": "2026-11-26", "merge_commit_sha": B}
+    guardian.evaluate(lambda: merged, lambda: [ORDINARY], A, REPO, merged_sha=B)
+    with pytest.raises(ValueError, match="does not prove provenance"):
+        guardian.evaluate(lambda: merged, lambda: [ORDINARY], A, REPO, merged_sha=A)
 
 
 def test_stale_event_cannot_publish_status(monkeypatch):
-    monkeypatch.setattr("tools.merge_guardian.api", lambda path: pr(B))
+    monkeypatch.setattr(guardian, "api", lambda path: pr(B))
     publish = Mock()
-    monkeypatch.setattr("tools.merge_guardian.status", publish)
+    monkeypatch.setattr(guardian, "status", publish)
     with pytest.raises(ValueError):
-        run_pr(REPO, "pull_request_target", {"pull_request": pr()})
+        guardian.run_pr(REPO, {"pull_request": pr()})
     publish.assert_not_called()
 
 
 def test_api_failure_marks_exact_head_failed(monkeypatch):
-    monkeypatch.setattr("tools.merge_guardian.api", lambda path: pr())
-    monkeypatch.setattr("tools.merge_guardian.inspect", Mock(side_effect=RuntimeError("API")))
+    monkeypatch.setattr(guardian, "api", Mock(side_effect=[pr(), RuntimeError("API")]))
     publish = Mock()
-    monkeypatch.setattr("tools.merge_guardian.status", publish)
+    monkeypatch.setattr(guardian, "status", publish)
     with pytest.raises(RuntimeError):
-        run_pr(REPO, "pull_request_target", {"pull_request": pr()})
+        guardian.run_pr(REPO, {"pull_request": pr()})
     assert [(call.args[1], call.args[2]) for call in publish.call_args_list] == [
         (A, "pending"), (A, "failure"),
     ]
+
+
+def workflow_runs():
+    return [
+        {"id": i, "path": path, "head_sha": A, "event": "pull_request",
+         "status": "completed", "conclusion": "success", "run_number": 1, "run_attempt": 1}
+        for i, path in enumerate(guardian.WORKFLOW_JOBS, 1)
+    ]
+
+
+def test_audit_checks_actual_workflow_paths_and_jobs(monkeypatch):
+    def pages(path, key):
+        if key == "workflow_runs":
+            return workflow_runs()
+        assert key == "jobs"
+        run_id = int(path.split("/")[-4])
+        jobs = list(guardian.WORKFLOW_JOBS.values())[run_id - 1]
+        return [{"name": name, "conclusion": "success"} for name in jobs]
+
+    monkeypatch.setattr(guardian, "pages", pages)
+    assert guardian.verify_pr_checks(REPO, A) == [1, 2, 3, 4]
+
+
+@pytest.mark.parametrize("change", [
+    {"head_sha": B}, {"path": ".github/workflows/other.yml"}, {"event": "push"},
+])
+def test_audit_rejects_wrong_head_event_or_workflow(monkeypatch, change):
+    runs = workflow_runs()
+    runs[0].update(change)
+    monkeypatch.setattr(guardian, "pages", Mock(return_value=runs))
+    with pytest.raises(ValueError, match="Missing PR workflow"):
+        guardian.verify_pr_checks(REPO, A)
+
+
+def test_audit_prefers_latest_failed_run(monkeypatch):
+    runs = workflow_runs()
+    failed = runs[0] | {"run_number": 2, "conclusion": "failure"}
+    monkeypatch.setattr(guardian, "pages", Mock(return_value=[failed, *runs]))
+    with pytest.raises(ValueError, match="Latest PR workflow did not pass"):
+        guardian.verify_pr_checks(REPO, A)
+
+
+def test_audit_requires_individual_successful_jobs(monkeypatch):
+    monkeypatch.setattr(guardian, "pages", Mock(side_effect=[workflow_runs(), []]))
+    with pytest.raises(ValueError, match="Missing successful required jobs"):
+        guardian.verify_pr_checks(REPO, A)

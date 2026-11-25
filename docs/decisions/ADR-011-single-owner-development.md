@@ -1,5 +1,7 @@
 # ADR-011 — Single-owner development with evidence-based acceptance
 
+**Superseded policy.** See [ADR-012](ADR-012-automated-acceptance.md) for current acceptance. Historical decisions and findings below retain their original status.
+
 Status: Owner-directed implementation proposal (2026-11-26); effective only after this PR is merged and native main protection is verified. PR #51 remains the original proposal. No Gate PASS or human approval is claimed.
 
 ## Policy

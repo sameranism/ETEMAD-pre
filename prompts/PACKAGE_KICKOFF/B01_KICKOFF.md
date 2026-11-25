@@ -1,6 +1,6 @@
 # آغاز تیم B01 — بنیان / Etemad Core
 
-**مدل پیشنهادی برای برنامه‌ریزی بسته:** Codex. **بازبین برنامه:** Codex مستقل.
+**مدل پیشنهادی برای برنامه‌ریزی بسته:** Codex. **پذیرش برنامه:** پیش‌نیازها و شواهد آزمون طبق ADR-012.
 
 ## ضمائم لازم
 - `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`
@@ -53,4 +53,4 @@ List exactly which tasks below are ready, blocked or depend on other packages. A
 - `S01-030` — `backend/tests/conftest.py` | C | `prompts/01_FOUNDATION/B01/S01-030__conftest_py.md`
 
 
-**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و بازبینی مستقل باشد.
+**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و معیار پذیرش خودکار داشته باشد.

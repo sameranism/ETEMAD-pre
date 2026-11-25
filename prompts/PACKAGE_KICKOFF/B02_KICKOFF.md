@@ -1,6 +1,6 @@
 # آغاز تیم B02 — ایران‌بان / Iran Monitor
 
-**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor Cloud Agent. **بازبین برنامه:** Codex مستقل.
+**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor Cloud Agent. **پذیرش برنامه:** پیش‌نیازها و شواهد آزمون طبق ADR-012.
 
 ## ضمائم لازم
 - `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`
@@ -30,4 +30,4 @@ List exactly which tasks below are ready, blocked or depend on other packages. A
 - `S02-007` — `backend/tests/test_domestic.py` | C | `prompts/02_INGEST_AND_DESIGN/B02/S02-007__test_domestic_py.md`
 
 
-**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و بازبینی مستقل باشد.
+**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و معیار پذیرش خودکار داشته باشد.

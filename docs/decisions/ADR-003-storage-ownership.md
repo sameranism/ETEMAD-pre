@@ -35,7 +35,7 @@ exists to prevent.
 
 - Ingest writes to its own database and emits events; the bridge to central is authenticated.
 - Archive (P26) stores identifiers and checksums, not copies of other packages' payloads.
-- Reviewers check the ownership table before approving any new table.
+- Migration tests for new tables must verify the ownership mapping and database boundary.
 
 ## Impacted contracts
 

@@ -1,5 +1,7 @@
 # ADR-010 — Conditional acceptance for Gate-00 preparation
 
+**Superseded policy.** See [ADR-012](ADR-012-automated-acceptance.md) for current acceptance. Historical decisions and findings below retain their original status.
+
 - **Status:** Proposed for `accepted-with-risk`
 - **Date:** 2026-11-24
 - **Task:** OPS-001

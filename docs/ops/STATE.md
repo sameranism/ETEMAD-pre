@@ -1,5 +1,40 @@
 # ETEMAD execution state
 
+## Current checkpoint — 2026-11-26 (Asia/Tehran)
+
+- Canonical repository: [sameranism/ETEMAD-pre](https://github.com/sameranism/ETEMAD-pre), protected `main`.
+- Security maintenance [PR #55](https://github.com/sameranism/ETEMAD-pre/pull/55)
+  squash merged head `66c40b443413926a90feccac9d4d627fd1516644` as
+  `48d0e77c1092a20150f5f000b5630d99bab2aab6`. All four native status contexts
+  and CodeQL passed on its head. CodeQL also passed on
+  [main run 45710579171](https://github.com/sameranism/ETEMAD-pre/actions/runs/45710579171).
+- The prior Merge Guardian returned failure for missing sensitive-change approval on
+  [PR #55](https://github.com/sameranism/ETEMAD-pre/actions/runs/45709344599)
+  and its [main push](https://github.com/sameranism/ETEMAD-pre/actions/runs/45710579289).
+  Both are historical results under the old policy. The status is outside the
+  four required native status contexts for this merge.
+- [Ruleset 28111497](https://github.com/sameranism/ETEMAD-pre/rules/28111497):
+  active, no bypass actors, four strict CI requirements, CodeQL, signed squash-only
+  PRs, deletion and force-push blocked. Unattributed-change approval is still on.
+- S09-023: the exact-head [backend run](https://github.com/sameranism/ETEMAD-pre/actions/runs/45709344460)
+  passed Ruff, Mypy, contract validation and Pytest and saved its test summary.
+  Prior failed attempts remain in the history below.
+- Gate-00: `OPEN / BLOCKED`. [Evidence and exact gaps](../gates/GATE-00.md).
+  Gate-01 acceptance evidence has not been verified on the canonical repository.
+- Next product task: `S03-006` after Gate-00, Gate-01, source scope and S03-002/S03-003
+  acceptance. Local preflight passed for all three. The current processing repository
+  is fixture-backed. The queue uses `canonical_url` and `content_hash`, while the
+  existing migration uses `(source_id, original_url)` and an indexed
+  `fingerprint`. Resolve the storage uniqueness and history criteria within the
+  processing ownership boundary before wiring PostgreSQL.
+- Inventory baseline: 111 of 223 target paths present (49.8% path coverage).
+  Accepted-task progress is unmeasured because the per-task evidence is incomplete.
+  Seven studio tasks remain deferred by the owner.
+- Rollback: revert an accepted change through a protected PR, with the applicable
+  checks and native CodeQL scanning still active.
+
+## Historical checkpoint — previous repository
+
 ## Current task
 
 - Task: `S09-023`

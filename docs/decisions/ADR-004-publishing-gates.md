@@ -33,7 +33,7 @@ Iranian publishing also requires a human legal/editorial signoff that no agent c
 ## Consequences
 
 - B08 can be fully built and tested with mocks while real publishing stays `BLOCKED`.
-- A reviewer can reject any PR that introduces an adapter call path without the gate checks above.
+- Publishing tests must reject adapter call paths that do not enforce the gates above.
 - The client must sign off any first real publish, outside the code path.
 
 ## Impacted contracts

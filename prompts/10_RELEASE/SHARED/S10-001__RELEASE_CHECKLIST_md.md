@@ -4,8 +4,8 @@
 **مرحله:** تحویل، استقرار و بازبینی نهایی  
 **بسته:** مشترک بین بسته‌ها  
 **پروژه:** `SHARED`  
-**مدل نویسنده پیشنهادی:** Codex independent reviewer (separate agent)  
-**بازبین:** Codex مستقل (اگر Codex نویسنده بود، اجرای دوم با زمینه جداگانه؛ ترجیحاً شخص/عامل متفاوت)  
+**مدل نویسنده پیشنهادی:** Codex\
+**پذیرش توسعه:** کنترل‌های خودکار و شواهد ثبت‌شده طبق ADR-012.\
 **شاخه Git:** `task/s10-001-all`  
 **فایل خروجی اصلی:** `docs/release/RELEASE_CHECKLIST.md`  
 **وضعیت اولیه:** `NOT_STARTED`
@@ -22,7 +22,7 @@
 
 ## پرامپت آماده — مستقیم در Cursor Agent کپی کن
 
-You are the ETEMAD Intelligent Newsroom coding agent assigned to **S10-001**. Use **Codex independent reviewer (separate agent)** if available; otherwise disclose your actual model.
+You are the ETEMAD Intelligent Newsroom coding agent assigned to **S10-001**. Use **Codex** if available; otherwise disclose your actual model.
 
 **READ FIRST:** `AGENTS.md`, relevant `.cursor/rules/*.mdc`, the master spec, the package spec (when applicable), and **all source references listed above**. Read existing target code, imported APIs, and tests before changing anything. This task prompt is the only approved scope for this run.
 
@@ -69,12 +69,12 @@ Do not claim the application, third-party connector or deployment is production-
 - A single failed critical gate blocks production; no fabricated readiness.
 - مسیر دیگری خارج از `docs/release/RELEASE_CHECKLIST.md` تغییر نکرده باشد.
 - داده‌ها و اسناد مبنا حفظ شده باشند؛ هر ادعای آزمون به لاگ واقعی پیوند داشته باشد.
-- نتیجه بازبینی مستقل Codex ثبت شده باشد.
+- نتیجهٔ کنترل‌های الزامی روی SHA همین PR طبق ADR-012 ثبت شده باشد.
 
 ## مدل و نحوه اجرا
 
-**مدل پیشنهادی:** Codex independent reviewer (separate agent). دلیل: بازبینی مستقل با تمرکز بر شواهد تست، ناسازگاری و اثر جانبی.
+**مدل پیشنهادی:** Codex. دلیل: بررسی شواهد تست، ناسازگاری و اثر جانبی.
 
 - اگر نام دقیق نسخه Grok یا Codex در حساب تو دیده نشد، نزدیک‌ترین مدل **واقعاً موجود و مجاز** را انتخاب کن و در گزارش نام واقعی آن را بنویس.
-- «Cursor Cloud Agent» محل اجراست، نه نام مدل. برای تغییرات امنیتی/قرارداد، نویسنده و بازبین باید دو اجرای مستقل باشند.
+- «Cursor Cloud Agent» محل اجراست. تغییرات امنیتی یا قراردادی به آزمون‌های سازگاری و مسیرهای منفی متناسب نیاز دارند.
 - مدل انتخاب‌شده توصیه برنامه‌ریزی است، نه نتیجه بنچمارک یا ضمانت کیفیت.

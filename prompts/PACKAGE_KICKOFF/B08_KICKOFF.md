@@ -1,6 +1,6 @@
 # آغاز تیم B08 — رسان / Publishing Engine
 
-**مدل پیشنهادی برای برنامه‌ریزی بسته:** Codex. **بازبین برنامه:** Codex مستقل.
+**مدل پیشنهادی برای برنامه‌ریزی بسته:** Codex. **پذیرش برنامه:** پیش‌نیازها و شواهد آزمون طبق ADR-012.
 
 ## ضمائم لازم
 - `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`
@@ -38,4 +38,4 @@ List exactly which tasks below are ready, blocked or depend on other packages. A
 - `S06-015` — `backend/tests/test_publishing.py` | C | `prompts/06_PUBLISHING/B08/S06-015__test_publishing_py.md`
 
 
-**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و بازبینی مستقل باشد.
+**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و معیار پذیرش خودکار داشته باشد.

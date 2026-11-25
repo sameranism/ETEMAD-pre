@@ -2,7 +2,7 @@
 
 **هدف:** کاهش سربار اجرای ۳۰ تسک ممیزی بدون حذف پرامپت اختصاصی هر فایل.
 
-**پیشنهاد اجرا:** Grok در Cursor Cloud، فقط تحلیل قراردادها؛ سپس Codex در نقش بازبین مستقل.
+**پیشنهاد اجرا:** Grok در Cursor Cloud، تحلیل قراردادها و اجرای کنترل‌های خودکار سازگاری.
 
 ## قراردادهای این دسته
 - `S00-027`: `docs/contract-audits/article.md`؛ بخوان: `source/contracts/schemas/article.schema.json` و example متناظر

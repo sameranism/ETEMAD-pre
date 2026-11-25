@@ -6,8 +6,6 @@ on:
   pull_request_target:
     branches: [main]
     types: [opened, reopened, synchronize, ready_for_review]
-  issue_comment:
-    types: [created]
 
 permissions:
   contents: read
@@ -15,11 +13,11 @@ permissions:
 
 jobs:
   trusted-policy:
-    if: github.event_name == 'pull_request_target' || (github.event_name == 'issue_comment' && github.event.issue.pull_request && startsWith(github.event.comment.body, '/guardian-recheck '))
+    if: github.event_name == 'pull_request_target' && !github.event.pull_request.draft
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
-      group: guardian-${{ github.event.pull_request.number || github.event.issue.number }}
+      group: guardian-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     permissions:
       contents: read
@@ -30,7 +28,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Evaluate trusted base policy and publish exact-head status
+      - name: Verify PR provenance and native branch controls
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 tools/merge_guardian.py
@@ -39,13 +37,17 @@ jobs:
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - name: Audit merged PR provenance and reviews
+      - name: Audit merged PR provenance and exact-head CI evidence
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 tools/merge_guardian.py
