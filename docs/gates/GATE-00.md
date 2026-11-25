@@ -3,6 +3,20 @@
 **Decision: OPEN / BLOCKED.** See the [automated acceptance procedure](../../prompts/GATES/GATE-00-REVIEW.md)
 and [ADR-012](../decisions/ADR-012-automated-acceptance.md).
 
+## Task-specific acceptance evidence — 2026-11-26
+
+Protected signed baseline `1a09ebe7fc7a975c54017b419102fd2b7b17f72c` ([PR #72](https://github.com/sameranism/ETEMAD-pre/pull/72)). PR #71 was merged before #72. PR #72 changed only the S00-018 workflow; all exact-head required checks and the additional AI Scan passed, and [main contracts](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887666/job/139585320633), [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887683), [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887770) and [Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887667) passed. Backend PR log: 172 passed, 15 warnings, Ruff and Mypy PASS. Record the following task-local evidence rather than blanket acceptance.
+
+| Task | Exact criterion and executed evidence | Disposition |
+| --- | --- | --- |
+| S00-017 | Read-only validator; `python tools/validate_contracts.py` succeeded for 30 schemas/30 examples; `python tools/check_gate00.py` succeeded with frozen hashes, 62 preflights and 336 negative cases. See exact main contract job above. | PASS for schema-validator scope; not semantic acceptance of 30 contracts |
+| S00-018 | [PR contract job](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722738683/job/139584817222) and exact-main contract job: 6 changed-file lint self-tests passed, malformed/nonstandard JSON and missing/outside local links rejected by self-test; existing frozen schema/negative checks passed. This workflow-only PR had zero changed JSON/Markdown files, so the change-lint job did not inspect modified documents in that PR. | PASS for declared workflow scope, not a claim of all Markdown dialects or anchor verification |
+| S00-055 | Locally executed byte-identical checker (Git blob verified `a4066ffaea559f0de1950ec90383a85b4c5d6fd1`): `python -m compileall -q` exit 0; `--self-test` exit 0 (two violations); `--root` on valid synthetic fixture exit 0; on a synthetic cross-package import plus direct DB URI fixture exit 1 with both categories reported. Exact-main CI also passed. | PASS for limited static checker; not comprehensive AST enforcement or secret scanning |
+
+Local repository-wide clone remains unavailable: `git ls-remote https://github.com/sameranism/ETEMAD-pre.git HEAD` exit 128, DNS resolution failed. The local S00-055 check used a temporary file verified against the connector's Git blob hash, not a full clone. No real credentials or private data were used. Six MDC files and six ADR heading inventories were inspected; their format/content checks do not by themselves establish complete task acceptance.
+
+The owner supplied an Actions Secrets settings screenshot indicating no repository or environment secrets are defined in that view. The earlier screenshot established Secret Protection and Push Protection enabled. Neither view shows historical secret-scanning alert results. Do not infer zero alerts. No screenshot or private information committed. Full semantic audit, relevant privacy/storage/permission evidence and remaining task dispositions are still required. Keep Gate-00 OPEN/BLOCKED and retain all downstream prerequisites. This record is effective on successful protected merge.
+
 ## Verified containment and credential-file checkpoint — 2026-11-26
 
 Signed protected main baseline: `64dc647cdbde2816a91df4a76807073b65107380`, [PR #70](https://github.com/sameranism/ETEMAD-pre/pull/70).
@@ -93,8 +107,8 @@ column was pending for every task.
 | S00-014 | `docs/architecture/SYSTEM_MAP.md` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-015 | `docs/architecture/CONTRACT_OWNERSHIP.md` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-016 | `docs/architecture/DATABASE_REVIEW.md` | Target and preflight PASS | — | BLOCKED pending complete evidence |
-| S00-017 | `tools/validate_contracts.py` | Target and preflight PASS | — | BLOCKED pending complete evidence |
-| S00-018 | `.github/workflows/contract-check.yml` | Target and preflight PASS | [CI run 45272942280](https://github.com/samram-shipt-it/ETEMAD/actions/runs/45272942280) | BLOCKED pending complete evidence |
+| S00-017 | `tools/validate_contracts.py` | Target and preflight PASS | — | PASS — scoped validator evidence above |
+| S00-018 | `.github/workflows/contract-check.yml` | Target and preflight PASS | [CI run 45272942280](https://github.com/samram-shipt-it/ETEMAD/actions/runs/45272942280) | PASS — scoped workflow evidence above |
 | S00-019 | `backend/pyproject.toml` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-020 | `frontend/package.json` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-021 | `README.md` | Target and preflight PASS | — | BLOCKED pending complete evidence |
@@ -131,7 +145,7 @@ column was pending for every task.
 | S00-052 | `.gitignore` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-053 | `.editorconfig` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-054 | `.github/CODEOWNERS` | Target and preflight PASS | — | BLOCKED pending complete evidence |
-| S00-055 | `tools/check_boundaries.py` | Target and preflight PASS | — | BLOCKED pending complete evidence |
+| S00-055 | `tools/check_boundaries.py` | Target and preflight PASS | — | PASS — scoped static checker evidence above |
 | S00-056 | `frontend/tsconfig.json` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-057 | `frontend/vite.config.ts` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-058 | `frontend/index.html` | Target and preflight PASS | — | BLOCKED pending complete evidence |
