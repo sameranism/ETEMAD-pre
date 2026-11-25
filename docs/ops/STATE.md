@@ -1,5 +1,9 @@
 # ETEMAD execution state
 
+## Production implementation scheduling — 2026-11-26
+
+The owner rejects prototype-only deliverables. [ADR-017](../decisions/ADR-017-production-code-staging.md) allows real task-owned implementation on parked branches, subject to authoritative interfaces. Integration/acceptance still requires all dependency Gates and exact-head checks. No new runtime implementation or gate acceptance is claimed by this decision. First candidate S03-006; continue Gate-00 evidence. Effective on protected merge.
+
 ## S00-001 continuation checkpoint — 2026-11-26
 
 - [PR #73](https://github.com/sameranism/ETEMAD-pre/pull/73) merged evidence for
