@@ -3,6 +3,29 @@
 **Decision: OPEN / BLOCKED.** See the [automated acceptance procedure](../../prompts/GATES/GATE-00-REVIEW.md)
 and [ADR-012](../decisions/ADR-012-automated-acceptance.md).
 
+## S00-001 acceptance evidence — 2026-11-26
+
+[PR #74](https://github.com/sameranism/ETEMAD-pre/pull/74) changed only `AGENTS.md`.
+Checked head `452ef7f43dbb6dd8f974a4576f96b6105a0180fc` was squash-merged to
+protected main at `765a193bd409eafb84bcabd6e5868f29639ac703`.
+A request to bypass frozen field names, enums or semantics now has an explicit
+stop-and-propose-ADR instruction. The existing Cursor kit and six Cursor
+rules were compared with the change. The audited files keep frozen contracts
+and scoped, protected PRs; no contradictory instruction was found.
+
+- `python tools/preflight.py S00-001 --pack .` exited 0 with nine attachments.
+- `python tools/check_gate00.py` passed 62 preflights, 30 schema/example pairs and 336 negative contract cases.
+- `python -m pytest -q backend/tests/test_contracts.py backend/tests/test_preflight.py` exited 0 with 10 passed.
+- Exact PR head: [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45724180068),
+  [contracts](https://github.com/sameranism/ETEMAD-pre/actions/runs/45724180029),
+  [bootstrap](https://github.com/sameranism/ETEMAD-pre/actions/runs/45724179965),
+  [Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45724179708)
+  and [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45724179998) passed.
+  Development review was NOT_REQUIRED under ADR-012.
+- This is acceptance of the instruction-file criterion. It supplies no evidence
+  about production routing, access controls, or GitHub secret alerts.
+  Rollback uses a protected revert of PR #74.
+
 ## Task-specific acceptance evidence — 2026-11-26
 
 Protected signed baseline `1a09ebe7fc7a975c54017b419102fd2b7b17f72c` ([PR #72](https://github.com/sameranism/ETEMAD-pre/pull/72)). PR #71 was merged before #72. PR #72 changed only the S00-018 workflow; all exact-head required checks and the additional AI Scan passed, and [main contracts](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887666/job/139585320633), [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887683), [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887770) and [Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45722887667) passed. Backend PR log: 172 passed, 15 warnings, Ruff and Mypy PASS. Record the following task-local evidence rather than blanket acceptance.
@@ -91,7 +114,7 @@ column was pending for every task.
 
 | Task | Target | Foundation check | Historical link | Acceptance |
 | --- | --- | --- | --- | --- |
-| S00-001 | `AGENTS.md` | Target and preflight PASS | [PR #41](https://github.com/samram-shipt-it/ETEMAD/pull/41) | BLOCKED pending complete evidence |
+| S00-001 | `AGENTS.md` | Target and preflight PASS | [PR #41](https://github.com/samram-shipt-it/ETEMAD/pull/41) | PASS — scoped instruction evidence above |
 | S00-002 | `.cursor/rules/architecture.mdc` | Target and preflight PASS | [PR #42](https://github.com/samram-shipt-it/ETEMAD/pull/42) | BLOCKED pending complete evidence |
 | S00-003 | `.cursor/rules/contracts.mdc` | Target and preflight PASS | — | BLOCKED pending complete evidence |
 | S00-004 | `.cursor/rules/security.mdc` | Target and preflight PASS | — | BLOCKED pending complete evidence |
