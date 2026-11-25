@@ -1,5 +1,21 @@
 # ETEMAD execution state
 
+## S00-001 continuation checkpoint — 2026-11-26
+
+- [PR #73](https://github.com/sameranism/ETEMAD-pre/pull/73) merged evidence for
+  S00-017, S00-018 and S00-055 at `0bb9240cd712011b042c279dffbbeb67c1f6daf1`.
+- [PR #74](https://github.com/sameranism/ETEMAD-pre/pull/74) changed only `AGENTS.md`.
+  Exact checked PR head `452ef7f43dbb6dd8f974a4576f96b6105a0180fc` merged at
+  `765a193bd409eafb84bcabd6e5868f29639ac703`. Preflight, 10 focused tests,
+  full foundation checks and exact-head CI passed. See the [evidence register](../gates/GATE-00.md).
+- Four of 62 Gate-00 rows now have scoped PASS evidence (6.5%). The active
+  target-path inventory remains 111 of 216 (51.4%); whole-project acceptance
+  progress is unmeasured. Gate-00 and Gate-01 remain open.
+- Continue OPS-001 with S00-002, the next open phase-zero row after S00-001.
+  Inspect the current architecture rule and run its preflight and applicable
+  tests before changing it. Preserve the remaining semantic and security
+  requirements and keep S03-006 gated by its documented dependencies.
+
 ## Gate-00 task evidence — 2026-11-26
 
 [PR #72](https://github.com/sameranism/ETEMAD-pre/pull/72) merged at signed main `1a09ebe7fc7a975c54017b419102fd2b7b17f72c`; all exact-head and main CI, CodeQL, Guardian passed. The Gate-00 register now records scoped PASS evidence for S00-017, S00-018 and S00-055 (effective after this documentation PR passes and merges). Local S00-055 fixture check verified the Git blob and rejected two violations with exit 1. Actions Secrets screenshot shows no configured repository/environment secrets, not a clean scan. Remaining semantic and applicable baseline security evidence stays BLOCKED. Continue first eligible task; no change to dependencies or deployment authorization.
