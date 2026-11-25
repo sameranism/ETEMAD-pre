@@ -6,10 +6,10 @@ import time
 
 import pytest
 
-from backend.core.audit import Auditor, REDACTED, InMemoryAuditSink, sanitize
+from backend.core.audit import REDACTED, Auditor, InMemoryAuditSink, sanitize
 from backend.core.auth import (
-    AuthenticationError,
     MIN_PASSWORD_LENGTH,
+    AuthenticationError,
     Principal,
     SessionInvalid,
     bearer_token,

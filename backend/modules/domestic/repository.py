@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from backend.core.contracts import validate_payload
 
@@ -32,7 +32,7 @@ class RawNewsRepository:
             self._by_id[news_id] = stored
             return dict(stored), True
 
-    def upsert_many(self, records: list[Mapping[str, Any]]) -> tuple[int, int]:
+    def upsert_many(self, records: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
         """Returns (created, skipped) after validating every record first."""
         created = skipped = 0
         for record in records:
