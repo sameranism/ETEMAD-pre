@@ -1,5 +1,9 @@
 # Contract audit - `private_report`
 
+## ADR-016 baseline containment correction — 2026-11-26
+
+[ADR-016](../decisions/ADR-016-private-event-containment.md) merged in [PR #68](https://github.com/sameranism/ETEMAD-pre/pull/68) at signed main `1fc80f48ab46500ee8fbb2647223f7e119ea737e`. Its exact-head [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45720153275), [contract](https://github.com/sameranism/ETEMAD-pre/actions/runs/45720153339), [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45720153351), [bootstrap](https://github.com/sameranism/ETEMAD-pre/actions/runs/45720153317) and [Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45720153084) passed. The correction adds typed executive_private rejection to the existing shared guard, used by both bus and outbox at append and dispatch. The five new test cases cover constructor and raw envelopes, shared dedupe preservation, no persistence or callback, and mutated pending entries. Existing restricted and public/internal behavior and all previous tests remain intact. No frozen contract, grant, storage, queue infrastructure or external service changes. Exact-head CI is required for these new tests; their success is not yet asserted in this entry. No local execution claimed. Dedicated private storage and authenticated transport remain deferred per ADR-015. This correction is not full semantic or privacy acceptance; Gate-00 remains BLOCKED.
+
 ## Semantic and privacy audit — 2026-11-26
 
 **Disposition: PARTIAL / BLOCKED.** Human or independent development review is NOT_REQUIRED under ADR-012; missing automated evidence is not waived.

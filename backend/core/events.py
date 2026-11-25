@@ -27,12 +27,18 @@ class RestrictedEventRoutingError(PermissionError):
     """No authorized restricted route exists on the shared fixture transport."""
 
 
+class ExecutivePrivateEventRoutingError(PermissionError):
+    """Executive-private events require a separate authorized transport."""
+
+
 def validate_shared_event(event: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate a snapshot and refuse restricted routing before any side effect."""
+    """Validate a snapshot and refuse private/restricted shared delivery."""
     envelope = dict(event)
     validate_payload("event_envelope", envelope)
     if envelope["classification"] == "restricted":
         raise RestrictedEventRoutingError("Restricted event requires an authorized route")
+    if envelope["classification"] == "executive_private":
+        raise ExecutivePrivateEventRoutingError("Executive-private event requires an authorized route")
     return envelope
 
 
