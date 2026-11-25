@@ -1,5 +1,11 @@
 # ETEMAD execution state
 
+## Owner scheduling decision — 2026-11-26
+
+- [PR #65](https://github.com/sameranism/ETEMAD-pre/pull/65) merged fixture workflow remediation; exact-main CI at `5ae55df26169b0034ebfc2a68e1ae66bbcf123cd` passed, including 167 backend tests and 336 negative contract cases. [PR #66](https://github.com/sameranism/ETEMAD-pre/pull/66) merged S00-041 audit at signed main `190649ad3b75969b7345beb3da71f1f21bc070a7`, exact-head mandatory CI PASS.
+- [ADR-015](../decisions/ADR-015-stage-security-delivery.md) schedules advanced implementations at existing owning phases; no security baseline or dependency is waived. This documentation PR requires its own exact-head checks.
+- Gate-00 remains OPEN/BLOCKED. Next: scoped fail-closed shared event routing for executive_private, applicable baseline security evidence and contract semantics. Then select the first eligible task in QUEUE. S03-006 still requires Gate-00/Gate-01 and source/dependency evidence. No production use, real private data or external side effects.
+
 ## Restricted routing remediation — 2026-11-26
 
 - [PR #60](https://github.com/sameranism/ETEMAD-pre/pull/60) merged ADR-013 at signed main [`514c5d6f1be87ac58537fb3b0c1d16a592827599`](https://github.com/sameranism/ETEMAD-pre/commit/514c5d6f1be87ac58537fb3b0c1d16a592827599). Its exact-head [backend](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186755), [contracts](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186800), [bootstrap](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186622), [Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186900), and [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715186951) all passed.
