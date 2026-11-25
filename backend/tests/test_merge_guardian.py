@@ -1,7 +1,7 @@
 """Regression fixtures for automated merge controls; all GitHub calls are mocked."""
 
 import copy
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 
@@ -182,3 +182,24 @@ def test_audit_requires_individual_successful_jobs(monkeypatch):
     monkeypatch.setattr(guardian, "pages", Mock(side_effect=[workflow_runs(), []]))
     with pytest.raises(ValueError, match="Missing successful required jobs"):
         guardian.verify_pr_checks(REPO, A)
+
+def test_provenance_index_can_catch_up_after_merge(monkeypatch):
+    merged = pr() | {"state": "closed", "merged_at": "2026-11-26", "merge_commit_sha": B}
+    lookup = Mock(side_effect=[[], [merged]])
+    wait = Mock()
+    monkeypatch.setattr(guardian, "pages", lookup)
+    monkeypatch.setattr(guardian, "sleep", wait)
+    assert guardian.find_merged_pr(REPO, B) == merged
+    assert lookup.call_args_list == [call(f"repos/{REPO}/commits/{B}/pulls")] * 2
+    wait.assert_called_once_with(2)
+
+
+def test_provenance_retries_fail_closed_for_unrelated_merge(monkeypatch):
+    unrelated = pr() | {"state": "closed", "merged_at": "2026-11-26", "merge_commit_sha": A}
+    lookup = Mock(return_value=[unrelated])
+    wait = Mock()
+    monkeypatch.setattr(guardian, "pages", lookup)
+    monkeypatch.setattr(guardian, "sleep", wait)
+    assert guardian.find_merged_pr(REPO, B) is None
+    assert lookup.call_count == 6
+    assert wait.call_args_list == [call(2), call(4), call(8), call(16), call(24)]

@@ -8,11 +8,18 @@
   automatic development acceptance. [Post-merge Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711967375)
   and [CodeQL on main](https://github.com/sameranism/ETEMAD-pre/actions/runs/45711967167)
   passed. Personal review for new development is NOT_REQUIRED under repository policy.
-- Current evidence change (S09-023 follow-up): add fixture PostgreSQL to GitHub
-  backend CI and run the full backend suite against its disposable test databases.
-  Locally, PostgreSQL 19.0 on loopback gave 140 passed, including migration
-  upgrade/downgrade/re-upgrade with central and domestic database separation.
-  The CI test uses PostgreSQL 18. No foreign migration exists in this chain.
+- [PR #57](https://github.com/sameranism/ETEMAD-pre/pull/57) merged
+  `fabfcf8e3aacd0e8d0c18caaa774dd15e17548ba` as
+  `58c2b53bf2e53234d42e7c9123a1a83c84cc91fc`. Its exact-head
+  [backend CI](https://github.com/sameranism/ETEMAD-pre/actions/runs/45712445039)
+  passed 140 tests on PostgreSQL 18 including separate central and domestic
+  migration round trips. [Trusted Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45712444735)
+  and [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45712445030)
+  passed. The foreign fixture remained untouched; there is no foreign migration.
+- The [first main audit attempt for #57](https://github.com/sameranism/ETEMAD-pre/actions/runs/45712663422/attempts/1)
+  failed while the merge-to-PR association was unavailable. The GitHub API now
+  maps the exact commit to merged PR #57. A bounded association retry preserves a
+  failed audit when GitHub does not return the matching PR.
 - The Gate-00 semantic audit reproduced a v1.0 producer mismatch for
   `event_envelope.classification=restricted`. Record exact contract
   and routing evidence before changing producer behavior. The approved

@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+from time import sleep
 
 CONTEXT = "etemad/trusted-guardian"
 WORKFLOW_JOBS = {
@@ -144,6 +145,20 @@ def verify_pr_checks(repo, sha):
     return verified
 
 
+def find_merged_pr(repo, sha):
+    """Allow GitHub's commit-to-PR index to catch up after the main push."""
+    for delay in (0, 2, 4, 8, 16, 24):
+        if delay:
+            sleep(delay)
+        candidates = pages(f"repos/{repo}/commits/{sha}/pulls")
+        for pr in candidates:
+            if (pr["merged_at"] and pr["merge_commit_sha"] == sha
+                    and pr["base"]["ref"] == "main"
+                    and pr["base"]["repo"]["full_name"].casefold() == repo.casefold()):
+                return pr
+    return None
+
+
 def audit_push(repo, before, after):
     subprocess.run(["git", "merge-base", "--is-ancestor", before, after], check=True)
     verify_protection(api(f"repos/{repo}/rules/branches/main"))
@@ -153,12 +168,9 @@ def audit_push(repo, before, after):
         print("| Main commit | Pull request | Provenance and CI |", file=summary)
         print("| --- | --- | --- |", file=summary)
         for sha in commits:
-            candidates = pages(f"repos/{repo}/commits/{sha}/pulls")
-            merged = next((item for item in candidates
-                           if item["merged_at"] and item["merge_commit_sha"] == sha
-                           and item["base"]["ref"] == "main"
-                           and item["base"]["repo"]["full_name"].casefold() == repo.casefold()), None)
+            merged = find_merged_pr(repo, sha)
             if merged is None:
+                print(f"Main commit {sha}: no matching merged PR after bounded retries")
                 print(f"| `{sha}` | — | MISSING_PR |", file=summary)
                 failures.append(sha)
                 continue
