@@ -13,8 +13,7 @@ from threading import Lock
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
-from backend.core.contracts import validate_payload
-from backend.core.events import dedupe_key
+from backend.core.events import dedupe_key, validate_shared_event
 
 
 @dataclass
@@ -41,10 +40,10 @@ class Outbox:
         self._lock = Lock()
 
     def append(self, event: Mapping[str, Any]) -> OutboxEntry:
-        validate_payload("event_envelope", event)
+        envelope = validate_shared_event(event)
         entry = OutboxEntry(
             entry_id=str(uuid4()),
-            event=dict(event),
+            event=envelope,
             created_at=datetime.now(timezone.utc).isoformat(),
         )
         with self._lock:
@@ -59,7 +58,9 @@ class Outbox:
         """Publish pending entries; returns how many were dispatched this call."""
         sent = 0
         for entry in self.pending():
-            publish(entry.event)
+            # Revalidate a snapshot: pending entries may have changed since append.
+            envelope = validate_shared_event(entry.event)
+            publish(envelope)
             with self._lock:
                 if entry.dispatched_at is None:
                     entry.dispatched_at = datetime.now(timezone.utc).isoformat()

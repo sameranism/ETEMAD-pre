@@ -3,6 +3,10 @@
 **Decision: OPEN / BLOCKED.** See the [automated acceptance procedure](../../prompts/GATES/GATE-00-REVIEW.md)
 and [ADR-012](../decisions/ADR-012-automated-acceptance.md).
 
+## ADR-013 scoped corrective maintenance — 2026-11-26
+
+[ADR-013](../decisions/ADR-013-restricted-event-routing.md) was merged in [PR #60](https://github.com/sameranism/ETEMAD-pre/pull/60) at `514c5d6f1be87ac58537fb3b0c1d16a592827599`. This corrective change adds constructor support for restricted while refusing it on the unauthenticated shared fixture bus and generic outbox. The frozen schema is unchanged. New positive and negative tests are present; their results require exact-head CI and are not asserted by this change. The historical mismatch below refers to its recorded baseline. Full semantic/security acceptance, executive-private delivery, authenticated restricted transport, permission/secret evidence and the wider prose/wire mismatch remain open. Gate-00 remains OPEN/BLOCKED; downstream entry conditions are unchanged.
+
 ## Exact-main evidence refresh — 2026-11-26
 
 Baseline: [`d1d773db8038ab3ac4b06f6c54ac450a2158ced7`](https://github.com/sameranism/ETEMAD-pre/commit/d1d773db8038ab3ac4b06f6c54ac450a2158ced7), merged via [PR #58](https://github.com/sameranism/ETEMAD-pre/pull/58).

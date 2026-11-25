@@ -16,11 +16,24 @@ from uuid import uuid4
 
 from backend.core.contracts import validate_payload
 
-CLASSIFICATIONS = frozenset({"public", "internal", "executive_private"})
+CLASSIFICATIONS = frozenset({"public", "internal", "restricted", "executive_private"})
 
 
 class UnknownClassification(ValueError):
     """Classification must be explicit; there is no default in the contract."""
+
+
+class RestrictedEventRoutingError(PermissionError):
+    """No authorized restricted route exists on the shared fixture transport."""
+
+
+def validate_shared_event(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate a snapshot and refuse restricted routing before any side effect."""
+    envelope = dict(event)
+    validate_payload("event_envelope", envelope)
+    if envelope["classification"] == "restricted":
+        raise RestrictedEventRoutingError("Restricted event requires an authorized route")
+    return envelope
 
 
 def make_event(
@@ -35,7 +48,7 @@ def make_event(
     event_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
-    """Build and validate one event envelope."""
+    """Build and validate one event envelope; this is not delivery authorization."""
     if classification not in CLASSIFICATIONS:
         raise UnknownClassification(f"unknown classification: {classification!r}")
     event = {
@@ -61,7 +74,7 @@ def dedupe_key(event: Mapping[str, Any]) -> str:
 
 class EventBus(Protocol):
     def publish(self, event: Mapping[str, Any]) -> None:
-        """Validate and deliver to every subscriber of the event type."""
+        """Validate and deliver eligible events to subscribers of the event type."""
 
     def subscribe(self, event_type: str, handler: Callable[[dict[str, Any]], None]) -> None:
         """Register a synchronous handler for one event type."""
@@ -81,14 +94,14 @@ class InMemoryEventBus:
         self._handlers.setdefault(event_type, []).append(handler)
 
     def publish(self, event: Mapping[str, Any]) -> None:
-        validate_payload("event_envelope", event)
+        envelope = validate_shared_event(event)
         with self._lock:
-            if dedupe_key(event) in self._seen:
+            if dedupe_key(envelope) in self._seen:
                 return
-            self._seen.add(dedupe_key(event))
-            handlers = list(self._handlers.get(str(event["event_type"]), ()))
+            self._seen.add(dedupe_key(envelope))
+            handlers = list(self._handlers.get(str(envelope["event_type"]), ()))
         for handler in handlers:
-            handler(dict(event))
+            handler(dict(envelope))
 
     def deliveries(self) -> set[str]:
         with self._lock:
