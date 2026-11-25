@@ -25,6 +25,9 @@ jobs:
       - name: validate all schemas and examples
         run: python tools/validate_contracts.py
 
+      - name: Gate-00 foundation checks
+        run: python tools/check_gate00.py
+
       - name: package boundary check
         run: python tools/check_boundaries.py --self-test && python tools/check_boundaries.py
 

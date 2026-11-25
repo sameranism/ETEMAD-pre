@@ -1,6 +1,6 @@
 # آغاز تیم B03 — جهان‌بان / Global Monitor
 
-**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor Cloud Agent. **بازبین برنامه:** Codex مستقل.
+**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor Cloud Agent. **پذیرش برنامه:** پیش‌نیازها و شواهد آزمون طبق ADR-012.
 
 ## ضمائم لازم
 - `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`
@@ -31,4 +31,4 @@ List exactly which tasks below are ready, blocked or depend on other packages. A
 - `S02-015` — `backend/tests/test_foreign.py` | C | `prompts/02_INGEST_AND_DESIGN/B03/S02-015__test_foreign_py.md`
 
 
-**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و بازبینی مستقل باشد.
+**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و معیار پذیرش خودکار داشته باشد.

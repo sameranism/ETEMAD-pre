@@ -1,6 +1,6 @@
 # آغاز تیم B07 — آوانما / AI News Studio
 
-**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor Cloud Agent. **بازبین برنامه:** Codex مستقل.
+**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor Cloud Agent. **پذیرش برنامه:** پیش‌نیازها و شواهد آزمون طبق ADR-012.
 
 ## ضمائم لازم
 - `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`
@@ -29,4 +29,4 @@ List exactly which tasks below are ready, blocked or depend on other packages. A
 - `S07-006` — `backend/tests/test_studio.py` | C | `prompts/07_STUDIO/B07/S07-006__test_studio_py.md`
 
 
-**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و بازبینی مستقل باشد.
+**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و معیار پذیرش خودکار داشته باشد.

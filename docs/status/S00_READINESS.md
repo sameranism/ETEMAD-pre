@@ -30,7 +30,7 @@ Status: **PARTIAL / BLOCKED**. This is a preparation record, not Stage S00 accep
 - [ ] UI library decision (shadcn/ui vs previous Mantine) recorded in decision log.
 - [ ] Actual contract check executed in CI or precise blocker recorded.
 - [ ] Secret leak and permissions review completed.
-- [ ] Gate-00 independently reviewed and passed.
+- [ ] Gate-00 accepted through the required checks in the current Gate register.
 
 ## Next safe action
 Import the original ETEMAD Cursor v2 document/prompt/contract package **without modifying its contents** in a separate change; verify file inventory, checksums and unresolved contradictions. Then perform S00-001 in its task branch; do not start B01 until gate acceptance.

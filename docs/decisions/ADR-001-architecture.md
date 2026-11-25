@@ -32,7 +32,7 @@ publication, and no external API use before official authorization.
 ## Consequences
 
 - A task may touch only its declared `TARGET`; a boundary change needs a separate ADR and task.
-- Package isolation is enforced by `tools/check_boundaries.py` and review, not by convention alone.
+- Package isolation is enforced by `tools/check_boundaries.py` and the compatibility tests required by ADR-012.
 - Local development can run the core alone with fixture adapters; ingest runs with mocks.
 
 ## Impacted contracts

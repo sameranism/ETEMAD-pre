@@ -1,29 +1,29 @@
 order,gate,task_id,phase,package,target,precondition,model,evidence_required,est_hours
-1,G0,S00-001,0,ALL,AGENTS.md,30 schema copied to source/contracts/schemas,C,file + independent review,1.5
-2,G0,S00-002,0,ALL,.cursor/rules/architecture.mdc,S00-001 merged,C,file + independent review,1.5
-3,G0,S00-003,0,ALL,.cursor/rules/contracts.mdc,S00-001 merged,C,file + independent review,1.5
-4,G0,S00-004,0,ALL,.cursor/rules/security.mdc,S00-001 merged,C,file + independent review,1.5
-5,G0,S00-005,0,ALL,.cursor/rules/frontend.mdc,S00-001 merged,C,file + independent review,1.5
-6,G0,S00-006,0,ALL,.cursor/rules/testing.mdc,S00-001 merged,C,file + independent review,1.5
-7,G0,S00-007,0,ALL,.cursor/rules/cloud-agent.mdc,-,C,file + independent review,1.5
-8,G0,S00-008,0,ALL,docs/decisions/ADR-001-architecture.md,S00-001 merged,C,file + independent review,1.5
-9,G0,S00-009,0,ALL,docs/decisions/ADR-002-ui-design-system.md,S00-001 merged,C,file + independent review,1.5
-10,G0,S00-010,0,ALL,docs/decisions/ADR-003-storage-ownership.md,S00-001 merged,C,file + independent review,1.5
-11,G0,S00-011,0,ALL,docs/decisions/ADR-004-publishing-gates.md,S00-001 merged,C,file + independent review,1.5
-12,G0,S00-012,0,ALL,docs/decisions/ADR-005-auth-roles.md,S00-001 merged,C,file + independent review,1.5
-13,G0,S00-013,0,ALL,docs/decisions/ADR-006-ai-provider-gateway.md,S00-001 merged,C,file + independent review,1.5
-14,G0,S00-014,0,ALL,docs/architecture/SYSTEM_MAP.md,S00-008 merged,C,file + independent review,1.5
-15,G0,S00-015,0,ALL,docs/architecture/CONTRACT_OWNERSHIP.md,-,C,file + independent review,1.5
-16,G0,S00-016,0,ALL,docs/architecture/DATABASE_REVIEW.md,-,C,file + independent review,1.5
+1,G0,S00-001,0,ALL,AGENTS.md,30 schema copied to source/contracts/schemas,C,file + applicable automated check logs for exact head,1.5
+2,G0,S00-002,0,ALL,.cursor/rules/architecture.mdc,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+3,G0,S00-003,0,ALL,.cursor/rules/contracts.mdc,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+4,G0,S00-004,0,ALL,.cursor/rules/security.mdc,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+5,G0,S00-005,0,ALL,.cursor/rules/frontend.mdc,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+6,G0,S00-006,0,ALL,.cursor/rules/testing.mdc,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+7,G0,S00-007,0,ALL,.cursor/rules/cloud-agent.mdc,-,C,file + applicable automated check logs for exact head,1.5
+8,G0,S00-008,0,ALL,docs/decisions/ADR-001-architecture.md,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+9,G0,S00-009,0,ALL,docs/decisions/ADR-002-ui-design-system.md,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+10,G0,S00-010,0,ALL,docs/decisions/ADR-003-storage-ownership.md,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+11,G0,S00-011,0,ALL,docs/decisions/ADR-004-publishing-gates.md,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+12,G0,S00-012,0,ALL,docs/decisions/ADR-005-auth-roles.md,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+13,G0,S00-013,0,ALL,docs/decisions/ADR-006-ai-provider-gateway.md,S00-001 merged,C,file + applicable automated check logs for exact head,1.5
+14,G0,S00-014,0,ALL,docs/architecture/SYSTEM_MAP.md,S00-008 merged,C,file + applicable automated check logs for exact head,1.5
+15,G0,S00-015,0,ALL,docs/architecture/CONTRACT_OWNERSHIP.md,-,C,file + applicable automated check logs for exact head,1.5
+16,G0,S00-016,0,ALL,docs/architecture/DATABASE_REVIEW.md,-,C,file + applicable automated check logs for exact head,1.5
 17,G0,S00-017,0,ALL,tools/validate_contracts.py,30 schema files present,C,contract-check CI green,1.0
 18,G0,S00-018,0,ALL,.github/workflows/contract-check.yml,S00-017 merged,C,contract-check CI green,1.0
-19,G0,S00-052,0,ALL,.gitignore,-,C,file + independent review,1.0
-20,G0,S00-053,0,ALL,.editorconfig,-,C,file + independent review,1.0
-21,G0,S00-054,0,ALL,.github/CODEOWNERS,-,C,file + independent review,1.0
-22,G0,S00-055,0,ALL,tools/check_boundaries.py,-,C,file + independent review,1.0
+19,G0,S00-052,0,ALL,.gitignore,-,C,file + applicable automated check logs for exact head,1.0
+20,G0,S00-053,0,ALL,.editorconfig,-,C,file + applicable automated check logs for exact head,1.0
+21,G0,S00-054,0,ALL,.github/CODEOWNERS,-,C,file + applicable automated check logs for exact head,1.0
+22,G0,S00-055,0,ALL,tools/check_boundaries.py,-,C,file + applicable automated check logs for exact head,1.0
 23,G0,S00-019,0,ALL,backend/pyproject.toml,none (verify existing config),C,"existing diff reviewed, no scope drift",1.0
 24,G0,S00-020,0,ALL,frontend/package.json,none (verify existing config),U,"existing diff reviewed, no scope drift",1.0
-25,G0,S00-021,0,ALL,README.md,S00-014 merged,C,file + independent review,1.5
+25,G0,S00-021,0,ALL,README.md,S00-014 merged,C,file + applicable automated check logs for exact head,1.5
 26,G0,S00-022,0,ALL,docs/contract-audits/access_decision.md,S00-003 + its schema present,C,file + owner/consumer fields reviewed,0.5
 27,G0,S00-023,0,ALL,docs/contract-audits/ai_models_config.md,S00-003 + its schema present,C,file + owner/consumer fields reviewed,0.5
 28,G0,S00-024,0,ALL,docs/contract-audits/analysis_chat_response.md,S00-003 + its schema present,C,file + owner/consumer fields reviewed,0.5

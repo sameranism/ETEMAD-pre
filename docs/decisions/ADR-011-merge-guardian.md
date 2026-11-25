@@ -1,5 +1,7 @@
 # ADR-011 — Report independent review after a push to main
 
+**Superseded policy.** See [ADR-012](ADR-012-automated-acceptance.md) for current acceptance. Historical decisions and findings below retain their original status.
+
 - **Status:** Historical proposal; superseded for routine development once the single-owner ADR and native protection are effective
 - **Task:** OPS-002
 - **Date:** 2026-11-24

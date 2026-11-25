@@ -6,7 +6,7 @@
 - This repo uses 6 conceptual layers, 9 packages B01..B09, 29 projects P01..P29; IDs do not change.
 
 ## Routine development and Gate control
-- Follow the repository root `AGENTS.md` and `docs/decisions/ADR-011-single-owner-development.md`. Routine fixture-only tasks use scoped PRs and actual successful checks without mandatory human approval; sensitive changes retain explicit authorization and independent review. Gate and release evidence requirements remain unchanged. Never push directly to main or force-push.
+- Follow the repository root `AGENTS.md` and `docs/decisions/ADR-012-automated-acceptance.md`. Every development task uses a scoped PR, applicable exact-head automated checks and verified prerequisite Gates. Never push directly to main or force-push. Live side effects still need specific authorization.
 
 ## Non-destructive modular development
 - Prefer a small stable core and independently testable feature modules with minimal dependencies.

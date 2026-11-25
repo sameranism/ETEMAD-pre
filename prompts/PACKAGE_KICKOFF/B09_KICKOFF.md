@@ -1,6 +1,6 @@
 # آغاز تیم B09 — دیدبان / Newsroom Dashboard
 
-**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor local Agent (UI preview). **بازبین برنامه:** Codex مستقل.
+**مدل پیشنهادی برای برنامه‌ریزی بسته:** Grok in Cursor local Agent (UI preview). **پذیرش برنامه:** پیش‌نیازها و شواهد آزمون طبق ADR-012.
 
 ## ضمائم لازم
 - `source/specs/00_MASTER_ETEMAD_ARCHITECTURE.md`
@@ -56,4 +56,4 @@ List exactly which tasks below are ready, blocked or depend on other packages. A
 - `S08-028` — `frontend/src/components/ConfirmAction.tsx` | U | `prompts/08_DASHBOARD/B09/S08-028__ConfirmAction_tsx.md`
 
 
-**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و بازبینی مستقل باشد.
+**ملاک موفقیت:** هر تسک دارای فایل هدف یکتا، ضمیمه مشخص، تست صریح و معیار پذیرش خودکار داشته باشد.
