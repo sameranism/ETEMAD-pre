@@ -3,6 +3,19 @@
 **Decision: OPEN / BLOCKED.** See the [automated acceptance procedure](../../prompts/GATES/GATE-00-REVIEW.md)
 and [ADR-012](../decisions/ADR-012-automated-acceptance.md).
 
+## Exact-main evidence refresh — 2026-11-26
+
+Baseline: [`d1d773db8038ab3ac4b06f6c54ac450a2158ced7`](https://github.com/sameranism/ETEMAD-pre/commit/d1d773db8038ab3ac4b06f6c54ac450a2158ced7), merged via [PR #58](https://github.com/sameranism/ETEMAD-pre/pull/58).
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Backend, Ruff, Mypy, contracts, migration and database separation | PASS (142 passed, 15 warnings; PostgreSQL 18.7) | [Job 139552603583](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713211748/job/139552603583) |
+| Foundation inventory, negative contract cases and package boundaries | PASS (62 preflights, 336 negative cases) | [Job 139552603853](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713211853/job/139552603853) |
+| Separate unit job | PASS (141 passed, 1 skipped because PostgreSQL URL unset, 1 warning) | [Job 139552604220](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713211853/job/139552604220) |
+| Main provenance audit and native scanning | PASS | [Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713211848), [CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45713211725) |
+
+Static inspection at this SHA confirms the event mismatch: the [frozen schema](https://github.com/sameranism/ETEMAD-pre/blob/d1d773db8038ab3ac4b06f6c54ac450a2158ced7/source/contracts/schemas/event_envelope.schema.json) includes restricted, but the [producer](https://github.com/sameranism/ETEMAD-pre/blob/d1d773db8038ab3ac4b06f6c54ac450a2158ced7/backend/core/events.py) excludes it. Before changing shared event behavior, obtain explicit authorization for an ADR and scoped implementation/consumer tests; do not edit the frozen wire enum. The semantic and privacy tests, secret/permission scan evidence, and per-task acceptance evidence remain open. A later trusted-base PR check is still required. Gate-00 stays OPEN/BLOCKED; all 62 existing task rows below retain their blocked disposition. Gate-01 and allowed-source evidence have not been established; S03-006 must not start.
+
 ## Verified foundation evidence
 
 | Check | Result | Evidence |
