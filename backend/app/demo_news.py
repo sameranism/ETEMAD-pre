@@ -8,7 +8,7 @@ from backend.core.contracts import validate_payload
 
 router = APIRouter(prefix="/v1/demo", tags=["local-demo"])
 
-_NEWS = (
+_NEWS: tuple[dict[str, object], ...] = (
     {
         "schema_version": "1.0",
         "news_id": "DEMO-001",

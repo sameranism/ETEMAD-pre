@@ -1,6 +1,6 @@
 # ADR-011 — Report independent review after a push to main
 
-- **Status:** Proposed
+- **Status:** Historical proposal; superseded for routine development once the single-owner ADR and native protection are effective
 - **Task:** OPS-002
 - **Date:** 2026-11-24
 
@@ -20,3 +20,5 @@ merge, revert, open issues, alter permissions, or deploy automatically.
 The pull request runs review-selection fixtures. Verify live push behavior only
 once this workflow reaches `main` through an approved PR. Close the draft to
 withdraw the proposal or revert the two files through a reviewed PR.
+
+The successor policy is documented in [ADR-011 single-owner development](ADR-011-single-owner-development.md). Existing review evidence is historical and must not be rewritten.

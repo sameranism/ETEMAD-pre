@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from backend.app.dependencies import build_services
 from backend.app.main import create_app
 from backend.core.auth import Principal, issue_session
-from backend.core.errors import ErrorCode, _STATUS
+from backend.core.errors import _STATUS, ErrorCode
 from backend.core.permissions import Grant
 
 KEY = b"api-test-session-key"

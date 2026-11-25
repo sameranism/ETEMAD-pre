@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_PACK = REPO_ROOT / "docs" / "pack"
+DEFAULT_PACK = REPO_ROOT
 SCHEMA_DIR = REPO_ROOT / "source" / "contracts" / "schemas"
 
 
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     attachments_csv = args.pack / "manifests" / "attachments_by_task.csv"
     if not tasks_csv.is_file() or not attachments_csv.is_file():
         print(f"BLOCKED: pack manifests not found under {args.pack}", file=sys.stderr)
-        print("  vendor the pack first (for example: docs/pack/source, docs/pack/manifests)", file=sys.stderr)
+        print("  use --pack with a directory containing manifests/tasks.csv and manifests/attachments_by_task.csv", file=sys.stderr)
         return 2
 
     task = next((row for row in _rows(tasks_csv) if row.get("id") == task_id), None)
