@@ -14,6 +14,15 @@ desktop.ini
 credentials*.json
 secrets*.json
 *.secret
+id_rsa
+id_ed25519
+id_ecdsa
+id_dsa
+generated_passwords.*
+first_use_passwords.*
+passwords.txt
+passwords.csv
+passwords.json
 
 # Python
 __pycache__/
