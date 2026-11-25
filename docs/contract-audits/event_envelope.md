@@ -1,5 +1,29 @@
 # Contract audit - `event_envelope`
 
+## Current automated acceptance evidence — 2026-11-26
+
+Status: PARTIAL / BLOCKED for full semantics. Historical independent-review wording below describes the earlier process; under [ADR-012](../decisions/ADR-012-automated-acceptance.md) an independent or human review is NOT_REQUIRED. Gate-00 evidence is still required.
+
+Baseline: signed protected main [`cd4a109715d591bd021ee8224debb51b007ac0ca`](https://github.com/sameranism/ETEMAD-pre/commit/cd4a109715d591bd021ee8224debb51b007ac0ca). [ADR-013](../decisions/ADR-013-restricted-event-routing.md) was merged in [PR #60](https://github.com/sameranism/ETEMAD-pre/pull/60); the scoped implementation was merged in [PR #61](https://github.com/sameranism/ETEMAD-pre/pull/61) after exact-head `755d5c61cc11981319caa7cdf86c28e8c09cb480` checks passed.
+
+| Check | Result and evidence |
+| --- | --- |
+| Constructor compatibility and shared route denial | PASS in fixture tests: all four v1.0 classifications; unknown enum/version; raw restricted envelope; no shared delivery, dedupe-key consumption or outbox persistence; mutated pending entry denied before callback; ordinary delivery and deduplication retained. [Backend job](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715867304/job/139561626605) reports 153 passed, 15 warnings, Ruff PASS, Mypy PASS (35 files), PostgreSQL 18.7. |
+| Contract validation and preflight | PASS, 62 task preflights (S00-035 target and four attachments), 336 negative contract cases, boundaries PASS, two deliberate boundary violations detected. [PR job](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715867411/job/139561627613); [exact main job](https://github.com/sameranism/ETEMAD-pre/actions/runs/45716200967/job/139562766766). |
+| Separate unit job | 152 passed, 1 skipped, 1 warning; PostgreSQL-covered backend job passed. [PR job](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715867411/job/139561627696). |
+| Provenance and scanning | [PR Guardian](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715867503), [PR CodeQL](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715867263), [bootstrap](https://github.com/sameranism/ETEMAD-pre/actions/runs/45715867229) and [main provenance](https://github.com/sameranism/ETEMAD-pre/actions/runs/45716200902) passed. Other main-push checks were not yet complete at the evidence capture. |
+
+The schema remains frozen, with Git blob `6cb35988557e365dab5f3f5f299d3a25228a7fb9`; example blob `a6941845157bc6241eafae75490255e285240468`. Neither was changed by PR #61. Pre-edit S00-035 preflight evidence comes from the exact-main contract job above, not a fresh local execution.
+
+### Remaining semantic boundaries
+
+- P29 owns the envelope contract. The fixture P07 handoff in [orchestrator.py](../../backend/core/orchestrator.py) emits internal `news.ingested`; the shared [bus](../../backend/core/events.py) and [outbox](../../backend/core/outbox.py) now deny restricted. This is not authorization for artifact reads, durable delivery or production use.
+- The master specification requires private queues and separate service identities. The fixture shared router still lacks classification-aware executive-private authorization. Do not deploy it for executive-private events. A separate owner-authorized correction must establish the approved private boundary and test denied direct/shared delivery and artifact access; ADR-013 specifically did not authorize this policy change.
+- The wire/prose mismatch remains: propose a separate ADR treating `event_type` and `occurred_at` as authoritative v1.0 names and retaining stream as trusted internal routing metadata, never an extra wire field. Before deciding, trace source of stream from trusted authoritative records and every cross-stream consumer; do not invent a mapping or alter the frozen schema. If a wire stream field is actually needed, require separately versioned contract and migration approval.
+- A fixture in-memory dedupe set is not durable global uniqueness or exactly-once delivery. Handler failure after dedupe reservation, crash recovery, transactional outbox, UTC normalization and consumer artifact-level authorization need separate evidence. No passing security claim is made for these paths.
+
+The restricted constructor/shared-routing discrepancy is resolved within the approved scope; S00-035 full semantic acceptance and Gate-00 remain BLOCKED. No new production, permission, schema, or runtime change is included in this audit. Only this audit document is modified; rollback through a protected revert PR.
+
 - **Task:** `S00-035` (phase 0)
 - **Status:** draft — schema/example validation PASS; semantic audit BLOCKED pending architecture ADR and independent signoff (Gate-00)
 - **Schema:** `source/contracts/schemas/event_envelope.schema.json`
