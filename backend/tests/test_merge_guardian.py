@@ -80,7 +80,7 @@ def test_head_drift_during_evaluation():
 
 
 def test_head_drift_at_final_check():
-    with pytest.raises(ValueError, match="before reporting"):
+    with pytest.raises(ValueError, match="changed"):
         evaluate(Mock(side_effect=[pr(), pr(), pr(B)]), lambda: [SENSITIVE],
                  lambda: [approval()], A, REPO)
 
