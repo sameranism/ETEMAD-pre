@@ -11,10 +11,12 @@ import logging
 import os
 import secrets
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Callable, Mapping
 
 from fastapi import Request
 
+from backend.app.pipeline import IngestPipeline
 from backend.core.archive import InMemoryArchiveStore
 from backend.core.audit import Auditor, InMemoryAuditSink
 from backend.core.db import DatabaseRegistry
@@ -27,8 +29,11 @@ from backend.core.output_switches import OutputSwitches, default_off_switches
 from backend.core.permissions import InMemoryGrantStore
 from backend.core.settings_service import InMemoryRevisionStore, SettingsService
 from backend.core.sources_service import SourceService
-from backend.app.pipeline import IngestPipeline
-from backend.modules.domestic.feed_client import FeedTransport, FixtureFeedTransport, HttpxFeedTransport
+from backend.modules.domestic.feed_client import (
+    FeedTransport,
+    FixtureFeedTransport,
+    HttpxFeedTransport,
+)
 from backend.modules.domestic.repository import RawNewsRepository
 from backend.modules.domestic.scheduler import PollStateStore
 
@@ -83,7 +88,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     bus = InMemoryEventBus()
     outbox = Outbox()
     archive = InMemoryArchiveStore()
-    objects = LocalObjectStore(environ.get("ETEMAD_OBJECT_ROOT", "backend/.local-objects"))
+    objects = LocalObjectStore(Path(environ.get("ETEMAD_OBJECT_ROOT", "backend/.local-objects")))
 
     def switches() -> OutputSwitches:
         stored = settings.get_latest("output_controls", "controls-main", "global")

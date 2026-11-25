@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Mapping
+from typing import Any, List, Mapping
 
 from backend.core.contracts import validate_payload
 
@@ -87,7 +87,7 @@ class SourceService:
         validate_payload("source_registry", record)
         return record
 
-    def _validate_with(self, sources: list[dict[str, Any]]) -> None:
+    def _validate_with(self, sources: List[dict[str, Any]]) -> None:
         validate_payload(
             "source_registry",
             {

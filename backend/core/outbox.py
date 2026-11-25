@@ -7,7 +7,7 @@ idempotent, so a crash between append and publish re-delivers exactly once.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Callable, Mapping

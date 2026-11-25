@@ -7,18 +7,19 @@ from pathlib import Path
 
 import pytest
 
-from backend.core.archive import InMemoryArchiveStore, InvalidArchiveKey, build_archive_record, object_key
+from backend.core.archive import (
+    InMemoryArchiveStore,
+    InvalidArchiveKey,
+    build_archive_record,
+    object_key,
+)
 from backend.core.events import InMemoryEventBus, dedupe_key, make_event
 from backend.core.health import health_report
 from backend.core.jobs import InvalidTransition, JobQueue, JobState
 from backend.core.object_store import InvalidObjectKey, LocalObjectStore
 from backend.core.orchestrator import Orchestrator
 from backend.core.outbox import Outbox
-from backend.core.output_switches import (
-    OutputDisabled,
-    OutputSwitches,
-    default_off_switches,
-)
+from backend.core.output_switches import OutputDisabled, OutputSwitches, default_off_switches
 from backend.core.sources_service import SourceNotAllowed, SourceNotFound, SourceService
 
 
