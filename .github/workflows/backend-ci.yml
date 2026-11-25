@@ -2,11 +2,8 @@ name: backend-ci
 
 on:
   pull_request:
-    paths:
-      - 'backend/**'
-      - 'source/contracts/**'
-      - 'tools/validate_contracts.py'
-      - '.github/workflows/backend-ci.yml'
+  push:
+    branches: [main]
 
 permissions:
   contents: read
