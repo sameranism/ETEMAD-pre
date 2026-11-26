@@ -65,3 +65,83 @@ def test_export_rejects_enabled_candidate_and_invalid_country():
         result.json_export()
     with pytest.raises(ValueError):
         discover_country("de", [])
+
+
+def _approved_source(**updates):
+    return {"source_id": "SRC-DE-FIXTURE", "stream": "foreign", "enabled": True,
+            "license_scope": "summary", "auth_ref": None, "feed_url": FEED,
+            "language": "de", "country": "DE", **updates}
+
+
+def test_foreign_conditional_fetch_and_collection():
+    import httpx
+
+    from backend.modules.foreign.collector import collect_foreign
+    from backend.modules.foreign.feed_client import ForeignFeedClient
+
+    rss = b"""<rss version="2.0"><channel><title>Fixture</title>
+    <item><title>Report about another country</title><link>https://example.invalid/news/1</link>
+    <description>Original summary</description><pubDate>Thu, 26 Nov 2026 20:00:00 +0100</pubDate></item>
+    <item><title>Duplicate</title><link>https://example.invalid/news/1</link></item>
+    </channel></rss>"""
+    def handler(request):
+        if request.headers.get("If-None-Match") == '"fixture"':
+            return httpx.Response(304)
+        return httpx.Response(200, content=rss, headers={"ETag": '"fixture"'})
+    client = ForeignFeedClient(httpx.MockTransport(handler))
+    source = _approved_source()
+    response = client.fetch(source)
+    records = collect_foreign(response, source, collected_at=NOW)
+    assert len(records) == 1
+    assert records[0]["stream"] == "foreign"
+    assert records[0]["source_country"] == "DE" and records[0]["subject_countries"] == []
+    assert records[0]["original_text"] == "Original summary"
+    assert records[0]["published_at"] == NOW.isoformat()
+    assert collect_foreign(response, source, collected_at=NOW) == records
+    metadata = collect_foreign(response, _approved_source(license_scope="metadata"), collected_at=NOW)
+    assert metadata[0]["original_text"] is None
+    assert metadata[0]["reuse_permission"] == "link_only"
+    assert collect_foreign(client.fetch(source, etag=response.etag), source) == []
+
+
+def test_foreign_client_denies_unapproved_and_rate_limited_sources():
+    import httpx
+
+    from backend.modules.foreign.feed_client import ForeignFeedClient, ForeignFeedError
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(429)
+    client = ForeignFeedClient(httpx.MockTransport(handler))
+    for source in (_approved_source(enabled=False), _approved_source(stream="domestic"),
+                   _approved_source(license_scope="unknown"), _approved_source(auth_ref="fixture")):
+        with pytest.raises(ForeignFeedError):
+            client.fetch(source)
+    assert calls == []
+    with pytest.raises(ForeignFeedError, match="rate limited"):
+        client.fetch(_approved_source())
+    assert len(calls) == 1
+
+
+def test_foreign_client_timeout_is_bounded():
+    import httpx
+
+    from backend.modules.foreign.feed_client import ForeignFeedClient, ForeignFeedError
+    calls = []
+    def handler(request):
+        calls.append(request)
+        raise httpx.ReadTimeout("fixture")
+    client = ForeignFeedClient(httpx.MockTransport(handler))
+    with pytest.raises(ForeignFeedError, match="transport failed"):
+        client.fetch(_approved_source())
+    assert len(calls) == 2
+
+
+def test_foreign_collector_rejects_unsafe_or_mismatched_document():
+    from backend.modules.foreign.collector import collect_foreign
+    from backend.modules.foreign.feed_client import ForeignFeedResponse
+    for body in (b"<html/>", b"<rss>", b"<!DOCTYPE rss><rss/>"):
+        with pytest.raises(ValueError):
+            collect_foreign(ForeignFeedResponse(FEED, body, 200), _approved_source())
+    with pytest.raises(ValueError, match="source mismatch"):
+        collect_foreign(ForeignFeedResponse("https://other.invalid/rss", RSS, 200), _approved_source())
