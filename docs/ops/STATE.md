@@ -1,5 +1,27 @@
 # ETEMAD execution state
 
+## Latest verified R04 dashboard-integration checkpoint — 2026-11-27
+
+- [PR #98](https://github.com/sameranism/ETEMAD-pre/pull/98) connected the
+  already merged B05 glossary and deterministic quality controls to an
+  authenticated, audited API and Persian RTL P27 preview at exact head
+  `9a5f6778685ec46af5da1177e79aca7f5c7215b4`, protected squash
+  `8b1b6fabf207400656d1b3a73ab13afb77a5f503`.
+- Exact-head backend/PostgreSQL CI `45909652919`, contract check
+  `45909652963`, CodeQL `45909652909`, Bootstrap `45909652916` and
+  Merge Guardian `45909652914` passed. Anonymous, missing-grant and invalid
+  contract/attribution cases fail closed.
+- This is not yet a deployed package milestone. Shellway device `ai` remained
+  offline; the last verified private runtime remains
+  `a8052e6d328f48dc33170f6e7dd7577ca7d2d8bc`. B05 is not counted toward the
+  five-package P27 report until exact-release deployment and synthetic
+  API/UI verification succeed.
+- Next point: backup all three databases, deploy combined #95/#96/#98 when the
+  VPS reconnects, grant only `editorial_workspace/default/preview` to a
+  synthetic account, verify 401/403/200 plus source immutability and UI once,
+  then revoke the grant/account. Rollback is the retained prior release plus a
+  protected revert of #98; this slice has no migration.
+
 ## Latest verified R04 code checkpoint — 2026-11-27
 
 - [PR #96](https://github.com/sameranism/ETEMAD-pre/pull/96) delivered S04-003
