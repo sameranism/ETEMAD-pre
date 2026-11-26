@@ -168,3 +168,108 @@ def test_quality_rejects_untraceable_quotes_and_prohibited_terms():
 def test_quality_requires_non_empty_text(source, draft):
     with pytest.raises(ValueError):
         assess_quality(source, draft, source_refs=(), attributed_refs=())
+
+
+def _editorial_source(**updates):
+    return {"schema_version": "1.0", "news_id": "NEWS-FIXTURE", "stream": "foreign",
+            "source_id": "SRC-FIXTURE", "source_country": "DE", "language": "en",
+            "original_url": "https://example.invalid/news", "original_title": "Fixture",
+            "original_text": 'Alice said “12 units”.', "subject_countries": [],
+            "collected_at": NOW.isoformat(), "content_scope": "summary",
+            "reuse_permission": "unverified", **updates}
+
+
+def _editorial_gateway(task, reply):
+    from backend.core.ai_gateway import Gateway, ModelBinding
+
+    class FixtureProvider:
+        name = "fixture"
+        def complete(self, prompt, *, model, timeout_s):
+            assert prompt and timeout_s > 0
+            return reply, 0.0
+
+    return Gateway({task: ModelBinding(task, "fixture", "fixture-model")},
+                   {"fixture": FixtureProvider()}, enabled=True)
+
+
+def _framework():
+    return {"schema_version": "1.0", "framework_id": "FW-FIXTURE", "desk": "international",
+            "stream": "foreign", "headline_max_chars": 110, "summary_max_chars": 300,
+            "required_sections": ["title", "lead", "body", "sources"],
+            "attribution_required": True, "updated_at": NOW.isoformat()}
+
+
+def test_translation_gateway_preserves_source_and_marks_semantic_review():
+    from backend.modules.editorial.translator import translate
+
+    raw = _editorial_source()
+    before = deepcopy(raw)
+    draft = translate(raw, gateway=_editorial_gateway("translation", 'Alice گفت «12 units».'),
+                      ruleset=rules(), desk="international", required_names=("Alice",))
+    assert raw == before
+    assert draft.record["news_id"] == raw["news_id"]
+    assert draft.record["target_language"] == "fa"
+    assert draft.record["model_id"] == "fixture/fixture-model"
+    assert draft.needs_review and draft.record["warnings"] == ["TRANSLATION_SEMANTIC_REVIEW_REQUIRED"]
+    assert draft.provenance["cost_usd"] == 0.0
+
+
+def test_translation_flags_omission_and_invented_quote():
+    from backend.modules.editorial.translator import translate
+
+    draft = translate(_editorial_source(), gateway=_editorial_gateway("translation", "او گفت «ساختگی»."),
+                      ruleset=rules(), desk="international", required_names=("Alice",))
+    assert {"FACT_NUMBER_MISMATCH", "FACT_NAME_MISMATCH", "DIRECT_QUOTE_MISMATCH",
+            "FABRICATED_QUOTE"} <= set(draft.record["warnings"])
+
+
+def test_translation_rejects_metadata_and_disabled_gateway():
+    from backend.core.ai_gateway import Gateway, GatewayDisabled
+    from backend.modules.editorial.translator import translate
+
+    with pytest.raises(ValueError, match="scope"):
+        translate(_editorial_source(content_scope="metadata"), gateway=Gateway({}, {}),
+                  ruleset=rules(), desk="international")
+    with pytest.raises(GatewayDisabled):
+        translate(_editorial_source(), gateway=Gateway({}, {}), ruleset=rules(), desk="international")
+
+
+def test_article_draft_uses_translation_and_never_grants_publication():
+    import json
+
+    from backend.modules.editorial.editor import create_draft
+    from backend.modules.editorial.translator import translate
+
+    raw = _editorial_source()
+    tr = translate(raw, gateway=_editorial_gateway("translation", 'Alice گفت «12 units».'),
+                   ruleset=rules(), desk="international")
+    reply = json.dumps({k: tr.record["translated_text"] for k in ("title", "lead", "body", "short_summary")})
+    draft = create_draft(raw, gateway=_editorial_gateway("editorial", reply),
+                         ruleset=rules(), framework=_framework(), translation=tr,
+                         required_names=("Alice",))
+    assert draft.record["status"] == "draft"
+    assert draft.record["source_refs"] == [raw["news_id"]]
+    assert "TRANSLATION_REVIEW_REQUIRED" in draft.warnings
+    assert evaluate_policy(draft.record, object_type="article", rights={}, context=context())["decision"] == "human_review"
+    with pytest.raises(ValueError, match="translation/source mismatch"):
+        create_draft({**raw, "original_text": "changed"}, gateway=_editorial_gateway("editorial", reply),
+                     ruleset=rules(), framework=_framework(), translation=tr)
+
+
+def test_article_holds_fabricated_facts_and_rejects_malformed_output():
+    import json
+
+    from backend.modules.editorial.editor import create_draft
+    from backend.modules.editorial.translator import translate
+
+    raw = _editorial_source()
+    tr = translate(raw, gateway=_editorial_gateway("translation", 'Alice گفت «12 units».'),
+                   ruleset=rules(), desk="international")
+    bad = json.dumps({k: "Alice گفت «99 میلیارد»" for k in ("title", "lead", "body", "short_summary")})
+    draft = create_draft(raw, gateway=_editorial_gateway("editorial", bad), ruleset=rules(),
+                         framework=_framework(), translation=tr)
+    assert draft.record["status"] == "held"
+    assert {"FACT_NUMBER_MISMATCH", "FABRICATED_QUOTE"} <= set(draft.warnings)
+    with pytest.raises(ValueError, match="article response"):
+        create_draft(raw, gateway=_editorial_gateway("editorial", "not-json"),
+                     ruleset=rules(), framework=_framework(), translation=tr)
