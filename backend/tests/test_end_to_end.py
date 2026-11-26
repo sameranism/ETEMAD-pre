@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from psycopg import sql
 from sqlalchemy.engine import make_url
@@ -16,6 +17,7 @@ from backend.app.dependencies import build_services
 from backend.app.main import create_app
 from backend.core.auth import Principal, issue_session
 from backend.core.permissions import Grant
+from backend.core.settings_service import DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE
 from backend.modules.domestic.feed_client import FeedResponse, FixtureFeedTransport
 from backend.modules.domestic.scheduler import (
     PollState,
@@ -51,6 +53,7 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
         "ETEMAD_FEED_MODE": "fixture",
         "ETEMAD_ENV": "staging",
         "ETEMAD_SOURCE_STORAGE": "postgres",
+        "ETEMAD_SCHEDULE_STORAGE": "postgres",
         "ETEMAD_OBJECT_ROOT": str(tmp_path / "objects"),
     }
     monkeypatch.chdir(BACKEND)
@@ -77,14 +80,39 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
                 "license_scope": "summary", "enabled": True,
             }
             first.sources.register(source)
+            schedule = {
+                "schema_version": "1.0", "config_id": DOMESTIC_INGEST_CONFIG_ID,
+                "stream": "domestic", "desk": "all", "timezone": "Asia/Tehran",
+                "mode": "interval", "fixed_times_local": [], "interval_minutes": 7,
+                "enabled": False, "updated_at": "2026-11-26T08:00:00Z",
+            }
+            schedule_args = dict(
+                contract_name="schedule_config", config_id=DOMESTIC_INGEST_CONFIG_ID,
+                scope=DOMESTIC_INGEST_SCOPE, value=schedule, expected_revision=0,
+                actor_id="eic-test", actor_role="editor_in_chief",
+            )
+            with pytest.raises(HTTPException) as denied:
+                first.settings.update(**schedule_args)
+            assert denied.value.status_code == 403
+            first.grants.grant(Grant(
+                "eic-test", "editor_in_chief", "config",
+                f"schedule_config:{DOMESTIC_INGEST_SCOPE}:{DOMESTIC_INGEST_CONFIG_ID}", "update",
+            ))
+            assert first.settings.update(**schedule_args).revision == 1
+            with pytest.raises(HTTPException) as conflict:
+                first.settings.update(**schedule_args)
+            assert conflict.value.status_code == 409
+            assert first.run_domestic_schedule(worker_id="disabled-schedule") == []
             snapshot_id = first.pipeline.sync_domestic_snapshot()
             assert snapshot_id.startswith("default:domestic:")
             assert first.sources.snapshot("foreign")["sources"] == []
             claims = first.pipeline.schedules.claim_due(worker_id="worker-a")
             assert len(claims) == 1
             assert claims[0].source_id == SOURCE_ID
+            assert first.pipeline.schedules.is_current(claims[0])
             assert first.pipeline.schedules.claim_due(worker_id="worker-b") == []
             first.pipeline.schedules.release(claims[0])
+            assert not first.pipeline.schedules.is_current(claims[0])
             replacement_claim = first.pipeline.schedules.claim_due(worker_id="worker-b")
             assert len(replacement_claim) == 1
             first.pipeline.schedules.release(replacement_claim[0])
@@ -131,6 +159,12 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
             second = build_services(environ=environ)
             services.append(second)
             assert second.sources.get(SOURCE_ID) == source
+            persisted = second.settings.get_latest(
+                "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
+            )
+            assert persisted is not None and persisted.revision == 1 and persisted.value == schedule
+            assert persisted.updated_by == "eic-test"
+            assert second.run_domestic_schedule(worker_id="disabled-after-restart") == []
             second.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "poll"))
             second.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "read"))
             second.grants.grant(Grant("eic-test", "editor_in_chief", "newsroom", "feed", "read"))
