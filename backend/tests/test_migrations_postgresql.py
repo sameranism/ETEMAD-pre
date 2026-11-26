@@ -108,6 +108,19 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             _exercise_source_registry(central)
             assert tables("domestic") == domestic_tables
             assert tables("foreign") == set()
+            foreign = Config("alembic_foreign.ini")
+            command.upgrade(foreign, "head")
+            foreign_tables = {
+                ("foreign", "source_candidates"), ("foreign", "poll_state"), ("foreign", "raw_items"),
+            }
+            assert tables("foreign") == foreign_tables
+            command.downgrade(foreign, "base")
+            assert tables("foreign") == set()
+            command.upgrade(foreign, "head")
+            _exercise_foreign_storage(foreign, os.environ["ETEMAD_DB_FOREIGN_URL"])
+            assert tables("foreign") == foreign_tables
+            assert tables("central") == central_tables
+            assert tables("domestic") == domestic_tables
         finally:
             for database in reversed(created):
                 control.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
@@ -327,3 +340,64 @@ def _exercise_source_registry(central):
             command.downgrade(central, "004_login_throttle")
     finally:
         registry.dispose()
+
+def _exercise_foreign_storage(foreign, foreign_url):
+    from dataclasses import replace
+    from datetime import datetime, timezone
+
+    from alembic import command
+    from sqlalchemy import create_engine
+
+    from backend.modules.foreign.collector import collect_foreign
+    from backend.modules.foreign.country_discovery import (
+        DocumentEvidence,
+        SiteEvidence,
+        discover_country,
+    )
+    from backend.modules.foreign.feed_client import ForeignFeedError, ForeignFeedResponse
+    from backend.modules.foreign.repository import ForeignRepository, PollCheckpoint
+
+    now = datetime(2026, 11, 26, 19, tzinfo=timezone.utc)
+    site = "https://example.invalid/"
+    feed = site + "rss"
+    body = b"""<rss><channel><title>Fixture</title><item><title>Foreign fixture</title>
+    <link>https://example.invalid/foreign/1</link><description>Original text</description>
+    </item></channel></rss>"""
+    result = discover_country(
+        "DE", [SiteEvidence(DocumentEvidence(site, 200, b'<link rel="alternate" type="application/rss+xml" href="/rss">', now), "DE", "de")],
+        feeds={feed: DocumentEvidence(feed, 200, body, now)}, generated_at=now,
+    )
+    candidate = result.pack["sources"][0]
+    approved = {**candidate, "enabled": True, "license_scope": "summary"}
+    engine = create_engine(foreign_url)
+    try:
+        repo = ForeignRepository(engine)
+        assert repo.save_candidates(result) == 1
+        assert repo.save_candidates(result) == 0
+        assert repo.candidates()[0]["payload"]["enabled"] is False
+        assert repo.candidates()[0]["verified"] is True
+        record = collect_foreign(ForeignFeedResponse(feed, body, 200), approved, collected_at=now)[0]
+        with pytest.raises(ForeignFeedError):
+            repo.save_raw(record, source=candidate)
+        assert repo.save_raw(record, source=approved)
+        assert not repo.save_raw(record, source=approved)
+        with pytest.raises(ValueError, match="immutable"):
+            repo.save_raw({**record, "original_text": "changed"}, source=approved)
+        with pytest.raises(ValueError, match="scope"):
+            repo.save_raw({**record, "stream": "domestic"}, source=approved)
+        assert not repo.save_raw({**record, "news_id": "NEWS-DUPLICATE",
+                                  "original_url": site + "foreign/2"}, source=approved)
+        first = PollCheckpoint(approved["source_id"], 0, now, etag='"fixture"')
+        saved = repo.save_checkpoint(first, source=approved)
+        assert saved.revision == 1
+        with pytest.raises(ValueError, match="stale"):
+            repo.save_checkpoint(first, source=approved)
+        assert repo.save_checkpoint(replace(saved, consecutive_failures=1), source=approved).revision == 2
+        engine.dispose()
+        restarted = ForeignRepository(engine)
+        assert restarted.raw_items() == [record]
+        assert restarted.checkpoint(approved["source_id"]).revision == 2
+        with pytest.raises(DBAPIError, match="not empty"):
+            command.downgrade(foreign, "base")
+    finally:
+        engine.dispose()
