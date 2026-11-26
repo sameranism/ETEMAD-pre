@@ -141,7 +141,8 @@ def test_config_update_requires_revision_and_role_grant(client, services) -> Non
         json={"value": example, "scope": "global", "expected_revision": 0},
         headers=headers,
     )
-    assert stale.status_code in {400, 409}
+    assert stale.status_code == 409
+    assert stale.json()["code"] == "conflict"
 
 
 def test_error_envelope_is_single_and_correlated(client) -> None:
@@ -158,3 +159,26 @@ def test_payload_too_large_maps_to_413() -> None:
 
 def test_demo_router_is_off_by_default(client) -> None:
     assert client.get("/v1/demo/news").status_code == 404
+
+def test_domestic_schedule_config_api(client, services) -> None:
+    path = "/v1/config/schedule_config/SCH-DOMESTIC-INGEST"
+    resource = "schedule_config:domestic:SCH-DOMESTIC-INGEST"
+    headers = {"Authorization": f"Bearer {_token(services)}"}
+    payload = {"scope": "domestic", "expected_revision": 0, "value": {
+        "schema_version": "1.0", "config_id": "SCH-DOMESTIC-INGEST",
+        "stream": "domestic", "desk": "all", "timezone": "Asia/Tehran",
+        "mode": "interval", "fixed_times_local": [], "interval_minutes": 7,
+        "enabled": False, "updated_at": "2026-11-26T08:00:00Z",
+    }}
+    assert client.get(path + "?scope=domestic").status_code == 401
+    assert client.get(path + "?scope=domestic", headers=headers).status_code == 403
+    assert client.put(path, json=payload, headers=headers).status_code == 403
+    services.grants.grant(Grant("eic-1", "editor_in_chief", "config", resource, "read"))
+    assert client.get(path + "?scope=domestic", headers=headers).status_code == 404
+    services.grants.grant(Grant("eic-1", "editor_in_chief", "config", resource, "update"))
+    assert client.put(path, json=payload, headers=headers).json()["revision"] == 1
+    assert client.get(path + "?scope=domestic", headers=headers).json()["value"] == payload["value"]
+    stale = client.put(path, json=payload, headers=headers)
+    assert stale.status_code == 409 and stale.json()["code"] == "conflict"
+    invalid = {**payload, "expected_revision": 1, "value": {**payload["value"], "stream": "foreign"}}
+    assert client.put(path, json=invalid, headers=headers).status_code == 400

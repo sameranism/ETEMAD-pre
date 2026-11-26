@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, SecretStr
 
 from backend.app.dependencies import Services, get_services
@@ -300,7 +300,7 @@ def update_config(
             actor_id=principal.subject_id,
             actor_role=principal.role,
         )
-    except APIError:
+    except (APIError, HTTPException):
         raise
     except Exception as exc:  # noqa: BLE001 - surfaced as a safe 400
         raise APIError(ErrorCode.CONTRACT_INVALID) from exc
