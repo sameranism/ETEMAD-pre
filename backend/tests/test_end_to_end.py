@@ -17,6 +17,9 @@ from backend.app.main import create_app
 from backend.core.auth import Principal, issue_session
 from backend.core.permissions import Grant
 from backend.modules.domestic.feed_client import FeedResponse, FixtureFeedTransport
+from backend.modules.domestic.scheduler import (
+    PollState, PollStateConflict, PostgresPollStateStore, record_failure,
+)
 
 ADMIN_URL = os.environ.get("ETEMAD_TEST_PG_ADMIN_URL")
 BACKEND = Path(__file__).resolve().parents[1]
@@ -61,17 +64,19 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
 
             first = build_services(environ=environ)
             services.append(first)
-            first.sources.register({
+            source = {
                 "source_id": SOURCE_ID, "site_url": "https://example.invalid",
                 "feed_url": FEED_URL, "api_base_url": None, "country": "IR",
                 "language": "en", "stream": "domestic", "auth_ref": None,
                 "license_scope": "summary", "enabled": True,
-            })
+            }
+            first.sources.register(source)
             assert isinstance(first.transport, FixtureFeedTransport)
             first.transport.responses = {
-                FEED_URL: FeedResponse(url=FEED_URL, status_code=200, body=RSS)
+                FEED_URL: FeedResponse(url=FEED_URL, status_code=200, body=RSS, etag='"cloud-v1"')
             }
             first.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "poll"))
+            first.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "read"))
             first.grants.grant(Grant("eic-test", "editor_in_chief", "newsroom", "feed", "read"))
             token = issue_session(Principal("eic-test", "editor_in_chief"), first.session_key)
             headers = {"Authorization": f"Bearer {token}", "X-Correlation-ID": "CORR-PG-TEST"}
@@ -85,6 +90,7 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
                     response = client.post(f"/v1/ingest/{SOURCE_ID}/poll", headers=headers)
                     assert response.status_code == 200
                     assert response.json()["collected"] == expected
+                    assert response.json()["status"] == ("ok" if expected else "not_modified")
                 feed = client.get("/v1/news", headers=headers)
                 assert feed.status_code == 200
                 assert feed.json()["count"] == 1
@@ -94,17 +100,63 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
                 news_id = item["news_id"]
                 first.grants.grant(Grant("eic-test", "editor_in_chief", "newsroom", news_id, "read"))
                 assert client.get(f"/v1/news/{news_id}", headers=headers).json()["news"]["news_id"] == news_id
+                first.transport.failures = {FEED_URL: "fixture timeout"}
+                failed = client.post(f"/v1/ingest/{SOURCE_ID}/poll", headers=headers)
+                assert failed.json()["status"] == "failed"
+                state_before = client.get(f"/v1/ingest/{SOURCE_ID}/poll-state", headers=headers).json()["state"]
+                assert state_before["etag"] == '"cloud-v1"'
+                assert state_before["consecutive_failures"] == 1
+                assert state_before["last_error"] == "fixture timeout"
             assert len(first.pipeline.repository) == len(first.pipeline.processed) == 1
             first.registry.dispose()
 
             # The app composition is recreated; both news stores must survive it.
             second = build_services(environ=environ)
             services.append(second)
+            second.sources.register(source)
+            second.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "poll"))
+            second.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "read"))
             second.grants.grant(Grant("eic-test", "editor_in_chief", "newsroom", "feed", "read"))
+            assert isinstance(second.transport, FixtureFeedTransport)
+            assert isinstance(second.pipeline.poll_states, PostgresPollStateStore)
+            second.transport.responses = {FEED_URL: FeedResponse(
+                url=FEED_URL, status_code=200, body=RSS, etag='"cloud-v1"'
+            )}
             with TestClient(create_app(services=second)) as client:
                 again = client.get("/v1/news", headers=headers)
                 assert again.status_code == 200
                 assert again.json()["items"] == [item]
+                state_url = f"/v1/ingest/{SOURCE_ID}/poll-state"
+                assert client.get(state_url, headers=headers).json()["state"] == state_before
+                assert client.get(state_url, headers={"Authorization": f"Bearer {unauthorized}"}).status_code == 403
+                retry = client.post(f"/v1/ingest/{SOURCE_ID}/poll", headers=headers)
+                assert retry.json()["status"] == "not_modified"
+                assert retry.json()["state"]["consecutive_failures"] == 0
+                assert retry.json()["state"]["last_error"] is None
+
+                store = second.pipeline.poll_states
+                current = store.get_or_create(SOURCE_ID)
+                stale = store.get_or_create(SOURCE_ID)
+                record_failure(current, error="newer result")
+                store.save(current)
+                record_failure(stale, error="older result")
+                with pytest.raises(PollStateConflict):
+                    store.save(stale)
+                assert store.get_or_create(SOURCE_ID).last_error == "newer result"
+                with pytest.raises(ValueError, match="loaded before saving"):
+                    store.save(PollState(source_id=SOURCE_ID))
+                with pytest.raises(ValueError, match="timezone"):
+                    current.next_poll_at = "2026-11-26T00:00:00"
+                    store.save(current)
+
+                def conflicting_poll(source_id):
+                    raise PollStateConflict("stale worker")
+
+                with monkeypatch.context() as patch:
+                    patch.setattr(second.pipeline, "poll_source", conflicting_poll)
+                    conflict = client.post(f"/v1/ingest/{SOURCE_ID}/poll", headers=headers)
+                    assert conflict.status_code == 409
+                    assert conflict.json()["code"] == "conflict"
             assert len(second.pipeline.repository) == len(second.pipeline.processed) == 1
         finally:
             for service in services:
