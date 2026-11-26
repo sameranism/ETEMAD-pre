@@ -67,7 +67,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 12
+            assert len(central_tables) == 13
+            assert ("processing", "foreign_inbox") in central_tables
             assert {('sources', 'source_registry'), ('sources', 'source_history')} <= central_tables
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
@@ -118,6 +119,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             assert tables("foreign") == set()
             command.upgrade(foreign, "head")
             _exercise_foreign_storage(foreign, os.environ["ETEMAD_DB_FOREIGN_URL"])
+            _exercise_foreign_inbox(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -401,3 +403,77 @@ def _exercise_foreign_storage(foreign, foreign_url):
             command.downgrade(foreign, "base")
     finally:
         engine.dispose()
+
+def _exercise_foreign_inbox(central):
+    from dataclasses import replace
+
+    from alembic import command
+
+    from backend.app.dependencies import build_services
+    from backend.app.foreign_inbox import ForeignInbox
+    from backend.modules.foreign.bridge import BridgeError, BridgeVerifier, sign_transfer
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    source = {
+        "source_id": "SRC-BRIDGE-FIXTURE", "site_url": "https://example.invalid/bridge/",
+        "feed_url": "https://example.invalid/bridge/rss", "country": "DE", "language": "de",
+        "stream": "foreign", "license_scope": "summary", "enabled": True,
+    }
+    raw = {
+        "schema_version": "1.0", "news_id": "NEWS-BRIDGE-FIXTURE", "stream": "foreign",
+        "source_id": source["source_id"], "source_country": "DE", "language": "de",
+        "original_url": "https://example.invalid/bridge/one", "original_title": "Bridge fixture",
+        "original_text": "Synthetic original foreign summary", "subject_countries": [],
+        "collected_at": "2026-11-26T19:00:00+00:00", "content_scope": "summary",
+        "reuse_permission": "unverified",
+    }
+    # Deterministic test material only; no actual service credential.
+    key = b"fixture-only-foreign-signing-key-0001"
+    verifier = BridgeVerifier({"foreign-fixture": key})
+    packet = sign_transfer(raw, sender="foreign-fixture", key=key, sent_at=1000)
+    engine = services.registry.engine("central")
+    inbox = ForeignInbox(engine, verifier, services.sources.get)
+    try:
+        with pytest.raises(BridgeError, match="not currently approved"):
+            inbox.receive(packet, now=1000)
+        services.sources.register(source)
+        with pytest.raises(BridgeError):
+            inbox.receive(replace(packet, body=packet.body + b" "), now=1000)
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            results = list(workers.map(lambda _: inbox.receive(packet, now=1000), range(2)))
+        assert sorted(r.duplicate for r in results) == [False, True]
+        assert len({r.receipt_id for r in results}) == 1
+        with pytest.raises(BridgeError):
+            inbox.receive(packet, now=2000)
+        refreshed = sign_transfer(raw, sender="foreign-fixture", key=key, sent_at=2000)
+        restarted = ForeignInbox(engine, verifier, services.sources.get)
+        assert restarted.receive(refreshed, now=2000).duplicate is True
+        conflicting = sign_transfer({**raw, "original_text": "Changed"}, sender="foreign-fixture",
+                                    key=key, sent_at=2000)
+        with pytest.raises(BridgeError, match="conflicting"):
+            restarted.receive(conflicting, now=2000)
+        services.sources.set_enabled(source["source_id"], False)
+        with pytest.raises(BridgeError, match="not currently approved"):
+            restarted.process_one(lambda _: pytest.fail("revoked source processed"))
+        services.sources.set_enabled(source["source_id"], True)
+        def crash_after_commit(record):
+            services.pipeline.process(record)
+            raise RuntimeError("fixture simulated crash after processing commit")
+        with pytest.raises(RuntimeError, match="simulated crash"):
+            restarted.process_one(crash_after_commit)
+        def recover(record):
+            item = services.pipeline.processed.get(record["news_id"])
+            assert item is not None and item.news == normalize(record)
+        assert restarted.process_one(recover)
+        assert not restarted.process_one(recover)
+        assert any(row["news_id"] == raw["news_id"] and row["stream"] == "foreign"
+                   for row in services.pipeline.feed(limit=50))
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM processing.foreign_inbox")).scalar_one() == 1
+            assert conn.execute(text("SELECT count(*) FROM processing.foreign_inbox WHERE processed_at IS NOT NULL")).scalar_one() == 1
+        with pytest.raises(DBAPIError, match="foreign inbox is not empty"):
+            command.downgrade(central, "005_source_registry")
+    finally:
+        services.registry.dispose()
