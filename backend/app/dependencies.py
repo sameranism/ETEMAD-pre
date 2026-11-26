@@ -31,7 +31,13 @@ from backend.core.orchestrator import Orchestrator
 from backend.core.outbox import Outbox
 from backend.core.output_switches import OutputSwitches, default_off_switches
 from backend.core.permissions import InMemoryGrantStore, PostgresGrantStore
-from backend.core.settings_service import InMemoryRevisionStore, SettingsService
+from backend.core.settings_service import (
+    DOMESTIC_INGEST_CONFIG_ID,
+    DOMESTIC_INGEST_SCOPE,
+    InMemoryRevisionStore,
+    PostgresIngestScheduleStore,
+    SettingsService,
+)
 from backend.core.sources_service import PostgresSourceService, SourceService
 from backend.modules.domestic.feed_client import (
     FeedTransport,
@@ -40,6 +46,8 @@ from backend.modules.domestic.feed_client import (
 )
 from backend.modules.domestic.repository import PostgresRawNewsRepository, RawNewsRepository
 from backend.modules.domestic.scheduler import (
+    DomesticPollPlan,
+    PollResult,
     PollStateStore,
     PostgresPollStateStore,
     PostgresScheduleStore,
@@ -69,6 +77,17 @@ class Services:
     transport: FeedTransport
     accounts: PostgresAccountStore | None = None
     orchestrator: Orchestrator = field(init=False)
+
+    def run_domestic_schedule(self, *, worker_id: str, limit: int = 10) -> list[PollResult]:
+        """Run one private worker tick using the latest scoped P02 configuration."""
+        revision = self.settings.get_latest(
+            "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
+        )
+        if revision is None:
+            return []
+        return self.pipeline.run_scheduled_batch(
+            DomesticPollPlan.from_record(revision.value), worker_id=worker_id, limit=limit,
+        )
 
     def __post_init__(self) -> None:
         self.orchestrator = Orchestrator(
@@ -134,8 +153,6 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     else:
         grant_store = InMemoryGrantStore()
         audit_sink = InMemoryAuditSink()
-    revision_store = InMemoryRevisionStore()
-    settings = SettingsService(revision_store, grant_store, credential_ref_check=lambda ref: bool(ref))
     source_storage = environ.get("ETEMAD_SOURCE_STORAGE", "fixture")
     if source_storage not in {"fixture", "postgres"}:
         raise ValueError("invalid ETEMAD_SOURCE_STORAGE")
@@ -147,6 +164,17 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         sources = PostgresSourceService(registry)
     else:
         sources = SourceService()
+    schedule_storage = environ.get("ETEMAD_SCHEDULE_STORAGE", "fixture")
+    if schedule_storage not in {"fixture", "postgres"}:
+        raise ValueError("invalid ETEMAD_SCHEDULE_STORAGE")
+    revision_store: InMemoryRevisionStore
+    if schedule_storage == "postgres":
+        if source_storage != "postgres":
+            raise ValueError("persistent schedule requires private PostgreSQL source registry")
+        revision_store = PostgresIngestScheduleStore(registry)
+    else:
+        revision_store = InMemoryRevisionStore()
+    settings = SettingsService(revision_store, grant_store, credential_ref_check=lambda ref: bool(ref))
     jobs = JobQueue()
     bus = InMemoryEventBus()
     outbox = Outbox()
