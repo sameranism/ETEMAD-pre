@@ -27,6 +27,7 @@ from backend.core.errors import APIError, ErrorCode, correlation_id_for
 from backend.core.health import health_report
 from backend.core.permissions import decide_access, require_access
 from backend.modules.domestic.api import build_router as build_domestic_router
+from backend.modules.foreign.api import build_router as build_foreign_router
 
 router = APIRouter(prefix="/v1")
 
@@ -360,6 +361,14 @@ def news_item(
 # Domestic ingest routes live in the package module; the app supplies auth and audit.
 router.include_router(
     build_domestic_router(
+        services_dep=get_services,
+        principal_dep=current_principal,
+        authorize=_authorize,
+    )
+)
+
+router.include_router(
+    build_foreign_router(
         services_dep=get_services,
         principal_dep=current_principal,
         authorize=_authorize,

@@ -120,6 +120,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             command.upgrade(foreign, "head")
             _exercise_foreign_storage(foreign, os.environ["ETEMAD_DB_FOREIGN_URL"])
             _exercise_foreign_inbox(central)
+            _exercise_foreign_dashboard()
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -475,5 +476,57 @@ def _exercise_foreign_inbox(central):
             assert conn.execute(text("SELECT count(*) FROM processing.foreign_inbox WHERE processed_at IS NOT NULL")).scalar_one() == 1
         with pytest.raises(DBAPIError, match="foreign inbox is not empty"):
             command.downgrade(central, "005_source_registry")
+    finally:
+        services.registry.dispose()
+
+def _exercise_foreign_dashboard():
+    from fastapi.testclient import TestClient
+
+    from backend.app.dependencies import build_services
+    from backend.app.foreign_workflow import FIXTURE_FEED, FIXTURE_SITE
+    from backend.app.main import create_app
+    from backend.core.auth import Principal, issue_session
+    from backend.core.permissions import Grant
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture", "ETEMAD_FOREIGN_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    assert services.foreign_workflow is not None
+    source = {"source_id": "SRC-FOREIGN-DASHBOARD-FIXTURE",
+        "site_url": FIXTURE_SITE, "feed_url": FIXTURE_FEED, "country": "DE", "language": "de",
+        "stream": "foreign", "license_scope": "summary", "enabled": True}
+    services.sources.register(source)
+    fixture_principal = Principal("fixture-staff", "staff")
+    headers = {"Authorization": "Bearer " + issue_session(fixture_principal, services.session_key)}
+    poll_path = "/v1/foreign/" + source["source_id"] + "/poll"
+    try:
+        with TestClient(create_app(services=services)) as client:
+            assert client.get("/v1/foreign/status").status_code == 401
+            assert client.get("/v1/foreign/status", headers=headers).status_code == 403
+            assert client.post(poll_path, headers=headers).status_code == 403
+            services.grants.grant(Grant("fixture-staff", "staff", "foreign_monitor", "default", "read"))
+            services.grants.grant(Grant("fixture-staff", "staff", "source_registry", source["source_id"], "poll"))
+            services.grants.grant(Grant("fixture-staff", "staff", "newsroom", "feed", "read"))
+            before = client.get("/v1/foreign/status?limit=50", headers=headers)
+            assert before.status_code == 200
+            assert before.headers["Cache-Control"] == "no-store"
+            assert client.get("/v1/foreign/status?limit=201", headers=headers).status_code == 400
+            initial = before.json()
+            assert "etag" not in before.text and "feed_url" not in before.text
+            first = client.post(poll_path, headers=headers)
+            assert first.status_code == 200, first.text
+            assert first.json()["collected"] == first.json()["delivered"] == first.json()["processed"] == 1
+            again = client.post(poll_path, headers=headers)
+            assert again.status_code == 200 and again.json()["not_modified"] is True
+            assert again.json()["collected"] == again.json()["delivered"] == again.json()["processed"] == 0
+            after = client.get("/v1/foreign/status", headers=headers).json()
+            for field in ("raw_count", "delivered_count", "received_count", "processed_count"):
+                assert after[field] == initial[field] + 1
+            assert all(candidate["enabled"] is False for candidate in after["candidates"])
+            news = client.get("/v1/news", headers=headers).json()
+            assert sum(item["source_id"] == source["source_id"] and item["stream"] == "foreign"
+                       for item in news["items"]) == 1
+            services.sources.set_enabled(source["source_id"], False)
+            assert client.post(poll_path, headers=headers).status_code == 403
     finally:
         services.registry.dispose()

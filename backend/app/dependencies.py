@@ -19,6 +19,7 @@ from typing import Callable, Mapping
 from fastapi import Request
 from sqlalchemy.engine import make_url
 
+from backend.app.foreign_workflow import ForeignWorkflow, build_foreign_fixture_workflow
 from backend.app.pipeline import IngestPipeline
 from backend.core.archive import InMemoryArchiveStore
 from backend.core.audit import Auditor, InMemoryAuditSink, PostgresAuditSink
@@ -76,6 +77,7 @@ class Services:
     pipeline: IngestPipeline
     transport: FeedTransport
     accounts: PostgresAccountStore | None = None
+    foreign_workflow: ForeignWorkflow | None = None
     orchestrator: Orchestrator = field(init=False)
 
     def run_domestic_schedule(self, *, worker_id: str, limit: int = 10) -> list[PollResult]:
@@ -216,6 +218,24 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         transport=transport,
     )
 
+    foreign_workflow: ForeignWorkflow | None = None
+    foreign_mode = environ.get("ETEMAD_FOREIGN_MODE", "off")
+    if foreign_mode not in {"off", "fixture"}:
+        raise ValueError("invalid foreign mode")
+    if foreign_mode == "fixture":
+        if (storage != "postgres" or source_storage != "postgres"
+                or environ.get("ETEMAD_ENV") != "staging"
+                or environ.get("ETEMAD_FEED_MODE", "fixture") != "fixture"):
+            raise ValueError("foreign workflow requires private fixture staging")
+        foreign_urls = [make_url(registry.url_for(role)) for role in ("central", "domestic", "foreign")]
+        if any(url.get_backend_name() != "postgresql" or not url.database for url in foreign_urls):
+            raise ValueError("foreign workflow requires three PostgreSQL databases")
+        if len({(url.host, url.port or 5432, url.database) for url in foreign_urls}) != 3:
+            raise ValueError("foreign database must be separate")
+        foreign_workflow = build_foreign_fixture_workflow(
+            registry.engine("foreign"), registry.engine("central"), sources, pipeline,
+        )
+
     return Services(
         registry=registry,
         session_key=session_key,
@@ -233,6 +253,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         pipeline=pipeline,
         transport=transport,
         accounts=accounts,
+        foreign_workflow=foreign_workflow,
     )
 
 

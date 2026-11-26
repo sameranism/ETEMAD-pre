@@ -98,3 +98,11 @@ class ForeignInbox:
                 WHERE news_id=:news_id
             """), {"news_id": row["news_id"]})
             return True
+
+    def counts(self) -> dict[str, int]:
+        with self._engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT count(*) AS received,count(*) FILTER (WHERE processed_at IS NOT NULL) AS processed
+                FROM processing.foreign_inbox
+            """)).mappings().one()
+        return {"received_count": int(row["received"]), "processed_count": int(row["processed"])}

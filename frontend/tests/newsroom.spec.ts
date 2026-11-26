@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import App, { parseNewsFeed } from "../src/app/App";
 import Login from "../src/features/auth/Login";
 import NewsDesk from "../src/features/newsroom/NewsDesk";
-import SourcesManager, { parseSources } from "../src/features/sources/SourcesManager";
+import SourcesManager, { ForeignMonitor, parseForeignStatus, parseSources } from "../src/features/sources/SourcesManager";
 import Settings, { parseDomesticSchedule, scheduleError } from "../src/features/settings/Settings";
 import { parseAuthResult } from "../src/lib/auth";
 
@@ -151,5 +151,27 @@ describe("domestic ingestion settings", () => {
     expect(html).toContain("در حال دریافت تنظیمات");
     expect(html).not.toContain("fixture-not-a-real-token");
     expect(html).not.toContain("ذخیره تنظیمات");
+  });
+});
+
+describe("foreign monitor", () => {
+  const status = { schema_version: "1.0", mode: "fixture", candidate_count: 1,
+    verified_candidate_count: 1, raw_count: 1, delivered_count: 1,
+    received_count: 1, processed_count: 1,
+    candidates: [{ source_id: "SRC-FIXTURE", country: "DE", language: "de", verified: true, enabled: false }],
+    polls: [{ source_id: "SRC-FIXTURE", revision: 1, last_success_at: null,
+      next_poll_at: "2026-11-26T19:00:00Z", consecutive_failures: 0 }],
+  };
+  it("parses actual fixture-backed status and never enables a candidate", () => {
+    expect(parseForeignStatus(status).processed_count).toBe(1);
+    expect(() => parseForeignStatus({ ...status, mode: "live" })).toThrow();
+    expect(() => parseForeignStatus({ ...status, processed_count: 2 })).toThrow();
+    expect(() => parseForeignStatus({ ...status, candidates: [{ ...status.candidates[0], enabled: true }] })).toThrow();
+  });
+  it("does not show candidate data before the authorized response", () => {
+    const html = renderToStaticMarkup(createElement(ForeignMonitor, { token: "fixture-not-real" }));
+    expect(html).toContain("جهان‌بان");
+    expect(html).not.toContain("SRC-FIXTURE");
+    expect(html).not.toContain("fixture-not-real");
   });
 });

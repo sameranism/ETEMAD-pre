@@ -185,3 +185,59 @@ class ForeignRepository:
             if revision is None:
                 raise ValueError("stale poll checkpoint")
         return PollCheckpoint(**{**params, "revision": revision})
+
+    def pending_delivery(self, source_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 200:
+            raise ValueError("invalid page limit")
+        with self._engine.connect() as conn:
+            rows = [dict(row) for row in conn.execute(text("""
+                SELECT payload FROM "foreign".raw_items
+                WHERE source_id=:id AND delivered_at IS NULL
+                ORDER BY fetched_at,raw_id LIMIT :limit
+            """), {"id": source_id, "limit": limit}).scalars()]
+        for row in rows:
+            validate_payload("raw_news", row)
+        return rows
+
+    def acknowledge_delivery(self, news_id: str, receipt_id: str) -> None:
+        expected = "EVT-" + _hash("P06:raw:" + news_id)
+        if receipt_id != expected:
+            raise ValueError("invalid bridge receipt identity")
+        params = {"id": news_id, "receipt": receipt_id}
+        with self._engine.begin() as conn:
+            updated = conn.execute(text("""
+                UPDATE "foreign".raw_items SET delivery_receipt=:receipt,delivered_at=now()
+                WHERE raw_id=:id AND delivered_at IS NULL RETURNING raw_id
+            """), params).scalar_one_or_none()
+            if updated is None:
+                existing = conn.execute(text("""
+                    SELECT delivery_receipt FROM "foreign".raw_items WHERE raw_id=:id
+                """), params).scalar_one_or_none()
+                if existing != receipt_id:
+                    raise ValueError("conflicting or missing bridge acknowledgment")
+
+    def overview(self, *, limit: int = 50) -> dict[str, Any]:
+        if not 1 <= limit <= 200:
+            raise ValueError("invalid page limit")
+        with self._engine.connect() as conn:
+            candidate_counts = conn.execute(text("""
+                SELECT count(*) AS total,count(*) FILTER (WHERE verified) AS verified
+                FROM "foreign".source_candidates
+            """)).mappings().one()
+            raw_counts = conn.execute(text("""
+                SELECT count(*) AS total,count(*) FILTER (WHERE delivered_at IS NOT NULL) AS delivered
+                FROM "foreign".raw_items
+            """)).mappings().one()
+            candidates = [dict(row) for row in conn.execute(text("""
+                SELECT candidate_id AS source_id,country_code AS country,
+                    payload->>'language' AS language,verified,false AS enabled
+                FROM "foreign".source_candidates ORDER BY candidate_id LIMIT :limit
+            """), {"limit": limit}).mappings()]
+            polls = [dict(row) for row in conn.execute(text("""
+                SELECT source_id,revision,last_success_at,next_poll_at,consecutive_failures
+                FROM "foreign".poll_state ORDER BY source_id LIMIT :limit
+            """), {"limit": limit}).mappings()]
+        return {"candidate_count": candidate_counts["total"],
+                "verified_candidate_count": candidate_counts["verified"],
+                "raw_count": raw_counts["total"], "delivered_count": raw_counts["delivered"],
+                "candidates": candidates, "polls": polls}
