@@ -48,6 +48,8 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
         "ETEMAD_SESSION_KEY": "test-only-session-key",
         "ETEMAD_NEWS_STORAGE": "postgres",
         "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_ENV": "staging",
+        "ETEMAD_SOURCE_STORAGE": "postgres",
         "ETEMAD_OBJECT_ROOT": str(tmp_path / "objects"),
     }
     monkeypatch.chdir(BACKEND)
@@ -116,7 +118,7 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
             # The app composition is recreated; both news stores must survive it.
             second = build_services(environ=environ)
             services.append(second)
-            second.sources.register(source)
+            assert second.sources.get(SOURCE_ID) == source
             second.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "poll"))
             second.grants.grant(Grant("eic-test", "editor_in_chief", "source_registry", SOURCE_ID, "read"))
             second.grants.grant(Grant("eic-test", "editor_in_chief", "newsroom", "feed", "read"))
@@ -179,3 +181,10 @@ def test_news_storage_configuration_fails_closed():
             "ETEMAD_NEWS_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "test-only",
             "ETEMAD_DB_CENTRAL_URL": same, "ETEMAD_DB_DOMESTIC_URL": same,
         })
+
+
+def test_source_storage_configuration_fails_closed():
+    with pytest.raises(ValueError, match="invalid ETEMAD_SOURCE_STORAGE"):
+        build_services({"ETEMAD_SOURCE_STORAGE": "unknown"})
+    with pytest.raises(ValueError, match="private staging"):
+        build_services({"ETEMAD_SOURCE_STORAGE": "postgres"})
