@@ -18,7 +18,25 @@ The original 223-task matrix, prompts and package/project IDs remain unchanged. 
 
 For each slice read original manifest, prompt and references, implement only owned changes, run affected checks and mandatory CI, merge through protected PR, verify a private VPS deployment once when permitted, log actual evidence and continue. Unrelated blockers do not stop independent eligible work. See [ADR-019](../decisions/ADR-019-product-first-delivery.md). R01/P03 source persistence and the versioned snapshot/durable-claim slice are delivered; the next implementation is independently configurable domestic scheduling/checkpoint behavior, followed by R02. Do not merge temporary test workflows or infer acceptance from file counts.
 
-## Current R04 checkpoint — 2026-11-27
+## Current R04 integration checkpoint — 2026-11-27
+
+- [PR #98](https://github.com/sameranism/ETEMAD-pre/pull/98) is merged as
+  `8b1b6fabf207400656d1b3a73ab13afb77a5f503` after all exact-head mandatory
+  checks passed on `9a5f6778685ec46af5da1177e79aca7f5c7215b4`.
+- The B05 glossary/quality capability now has an authenticated, audited
+  `/v1/editorial/rules/preview` path and a Persian RTL P27 workbench. It
+  remains default-deny without an explicit server grant and has no persistence,
+  publication, external request or model call.
+- Deployment is pending because Shellway `ai` is offline. B05 is not counted
+  toward the five-package P27 milestone before private deployment and a
+  synthetic end-to-end API/UI check.
+- Exact continuation: when the VPS reconnects, back up all three databases,
+  deploy combined #95/#96/#98, exercise 401/403/200 and source immutability,
+  revoke the temporary grant/account and record the active release. If the VPS
+  remains unavailable, continue only an independent eligible code slice with
+  WIP=1; do not claim operational acceptance.
+
+## Prior R04 code checkpoint — 2026-11-27
 
 - S04-001, S04-002 and S04-003 code is merged through protected PRs #95 and #96.
   PR #96 exact head `465ef3fe73d71f2708003d03638dd509d99fd881`
