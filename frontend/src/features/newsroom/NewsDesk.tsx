@@ -21,7 +21,14 @@ export type NewsRecord = {
   normalization_version: string;
 };
 
-type Props = { items: readonly NewsRecord[]; state?: "ready" | "loading" | "error" | "forbidden" };
+// Existing /v1/news projection: no invented normalized-contract fields.
+export type NewsFeedRecord = Pick<NewsRecord,
+  "news_id" | "stream" | "source_id" | "original_url" | "collected_at" |
+  "reuse_permission" | "content_scope"
+> & { title: string; event_id: string; desks: string[] };
+
+type DeskRecord = NewsRecord | NewsFeedRecord;
+type Props = { items: readonly DeskRecord[]; state?: "ready" | "loading" | "error" | "forbidden" };
 type Stream = "all" | NewsRecord["stream"];
 
 const streamNames: Record<Stream, string> = {
@@ -74,11 +81,14 @@ export default function NewsDesk({ items, state = "ready" }: Props) {
                   {new Intl.DateTimeFormat("fa-IR", { dateStyle: "medium", timeStyle: "short", timeZone: "Asia/Tehran" }).format(new Date(item.collected_at))}
                 </time>
               </div>
-              <h3 dir={item.language === "fa" ? "rtl" : "ltr"}>{item.original_title}</h3>
+              <h3 dir="auto">{"original_title" in item ? item.original_title : item.title}</h3>
+              {"event_id" in item && (
+                <p dir="auto">رویداد: {item.event_id} · سرویس: {item.desks.join("، ")}</p>
+              )}
               <p>{item.reuse_permission === "unverified" ? "حق بازنشر تأیید نشده" : "وضعیت حق استفاده: " + item.reuse_permission}</p>
               {sourceUrl ? (
                 <a href={sourceUrl} target="_blank" rel="noopener noreferrer">
-                  منبع نمونه <span className="sr-only">(در پنجره جدید)</span>
+                  منبع خبر <span className="sr-only">(در پنجره جدید)</span>
                 </a>
               ) : <span>نشانی منبع نامعتبر است</span>}
             </li>

@@ -1,8 +1,8 @@
 """B01/P01 application wiring: one Services object, injected via app.state.
 
-Every store here is a fixture implementation except the database registry. They
-are wired explicitly so that replacing one with a PostgreSQL-backed store later
-does not touch route code.
+News repositories support explicitly selected PostgreSQL storage. Other stores
+retain their existing fixture wiring; selecting PostgreSQL never implies that
+unrelated production prerequisites have passed.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Callable, Mapping
 
 from fastapi import Request
+from sqlalchemy.engine import make_url
 
 from backend.app.pipeline import IngestPipeline
 from backend.core.archive import InMemoryArchiveStore
@@ -34,8 +35,9 @@ from backend.modules.domestic.feed_client import (
     FixtureFeedTransport,
     HttpxFeedTransport,
 )
-from backend.modules.domestic.repository import RawNewsRepository
-from backend.modules.domestic.scheduler import PollStateStore
+from backend.modules.domestic.repository import PostgresRawNewsRepository, RawNewsRepository
+from backend.modules.domestic.scheduler import PollStateStore, PostgresPollStateStore
+from backend.modules.processing.repository import PostgresProcessingRepository, ProcessingRepository
 
 _LOG = logging.getLogger(__name__)
 
@@ -71,8 +73,32 @@ class Services:
 def build_services(environ: Mapping[str, str] | None = None) -> Services:
     environ = os.environ if environ is None else environ
     registry = DatabaseRegistry(environ=environ)
+    storage = environ.get("ETEMAD_NEWS_STORAGE", "fixture")
+    if storage not in {"fixture", "postgres"}:
+        raise ValueError("invalid ETEMAD_NEWS_STORAGE")
+    raw_repository: RawNewsRepository | PostgresRawNewsRepository
+    processing_repository: ProcessingRepository | PostgresProcessingRepository
+    if storage == "postgres":
+        try:
+            domestic_url = make_url(registry.url_for("domestic"))
+            central_url = make_url(registry.url_for("central"))
+        except (ValueError, RuntimeError):
+            raise ValueError("separate domestic and central PostgreSQL URLs are required") from None
+        urls = (domestic_url, central_url)
+        if any(url.get_backend_name() != "postgresql" or not url.database for url in urls):
+            raise ValueError("both news database roles require PostgreSQL database names")
+        endpoints = {(url.host, url.port or 5432, url.database) for url in urls}
+        if len(endpoints) != 2:
+            raise ValueError("domestic and central databases must be separate")
+        raw_repository = PostgresRawNewsRepository(registry)
+        processing_repository = PostgresProcessingRepository(registry)
+    else:
+        raw_repository = RawNewsRepository()
+        processing_repository = ProcessingRepository()
 
     session_key = environ.get("ETEMAD_SESSION_KEY", "").strip().encode("utf-8")
+    if storage == "postgres" and not session_key:
+        raise ValueError("ETEMAD_SESSION_KEY must be configured for persistent news storage")
     if not session_key:
         # Ephemeral per-process key: development only. Production must set the
         # variable; tokens do not survive a restart without it.
@@ -109,8 +135,9 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
 
     pipeline = IngestPipeline(
         sources=sources,
-        repository=RawNewsRepository(),
-        poll_states=PollStateStore(),
+        repository=raw_repository,
+        processed=processing_repository,
+        poll_states=PostgresPollStateStore(registry) if storage == "postgres" else PollStateStore(),
         transport=transport,
     )
 

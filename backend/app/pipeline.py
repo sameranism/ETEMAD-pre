@@ -13,7 +13,7 @@ from typing import Any, Mapping
 from backend.core.sources_service import SourceService
 from backend.modules.domestic.collector import collect
 from backend.modules.domestic.feed_client import FeedError, FeedTransport, fetch_with_retry
-from backend.modules.domestic.repository import RawNewsRepository
+from backend.modules.domestic.repository import PostgresRawNewsRepository, RawNewsRepository
 from backend.modules.domestic.scheduler import (
     PollResult,
     PollStateStore,
@@ -24,18 +24,24 @@ from backend.modules.processing.classifier import classify
 from backend.modules.processing.deduplicator import Clusterer
 from backend.modules.processing.extractor import extract
 from backend.modules.processing.normalizer import normalize
-from backend.modules.processing.repository import ProcessingItem, ProcessingRepository
+from backend.modules.processing.repository import (
+    PostgresProcessingRepository,
+    ProcessingItem,
+    ProcessingRepository,
+)
 from backend.modules.processing.router import route
 
 
 @dataclass
 class IngestPipeline:
     sources: SourceService
-    repository: RawNewsRepository
+    repository: RawNewsRepository | PostgresRawNewsRepository
     poll_states: PollStateStore
     transport: FeedTransport
     clusterer: Clusterer = field(default_factory=Clusterer)
-    processed: ProcessingRepository = field(default_factory=ProcessingRepository)
+    processed: ProcessingRepository | PostgresProcessingRepository = field(
+        default_factory=ProcessingRepository
+    )
 
     # --- ingest -----------------------------------------------------------
     def poll_source(self, source_id: str) -> PollResult:
@@ -123,11 +129,11 @@ class IngestPipeline:
                     "stream": news["stream"],
                     "source_id": news["source_id"],
                     "original_url": news["original_url"],
-                    "published_at": news["published_at"],
+                    "published_at": news.get("published_at"),
                     "collected_at": news["collected_at"],
                     "reuse_permission": news["reuse_permission"],
                     "content_scope": news["content_scope"],
-                    "text": news["normalized_text"],
+                    "text": news.get("normalized_text"),
                     "event_id": item.cluster["event_id"],
                     "duplicate_of": item.cluster["duplicate_of"],
                     "desks": classification["desks"],
