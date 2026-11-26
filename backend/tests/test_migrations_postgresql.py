@@ -66,14 +66,18 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 9
+            assert len(central_tables) == 10
+            assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
                 "audit", "control", "identity", "processing",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "001_baseline")
-            assert tables("central") == {row for row in central_tables if row[0] != "processing"}
+            assert tables("central") == {
+                row for row in central_tables
+                if row[0] != "processing" and row != ("identity", "login_throttle")
+            }
             command.downgrade(central, "base")
             assert tables("central") == set()
             command.upgrade(central, "head")
