@@ -1,5 +1,26 @@
 # ETEMAD execution state
 
+## Latest verified R04 code checkpoint — 2026-11-27
+
+- [PR #96](https://github.com/sameranism/ETEMAD-pre/pull/96) delivered S04-003
+  deterministic editorial quality evidence at exact head
+  `465ef3fe73d71f2708003d03638dd509d99fd881`, protected squash
+  `43867947a784ef6e424d9a1c25a6cc49ba014e3c`.
+- Exact-head backend CI `45903537324`, contract check `45903537249`,
+  CodeQL `45903537215`, Bootstrap `45903537162` and Merge Guardian
+  `45903537114` passed. The slice detects missing citation/attribution,
+  changed numbers or required names, fabricated direct quotations, missing
+  configured claim evidence and configured prohibited terms without mutating
+  source text.
+- This is an isolated B05 code checkpoint, not a deployed or accepted package
+  integration. Shellway host `ai` was offline; the last verified private
+  runtime remains `a8052e6d328f48dc33170f6e7dd7577ca7d2d8bc`. B05 is not
+  counted toward the five-package P27 milestone.
+- Next WIP=1: authorized P10/P11 API and dashboard wiring for the already merged
+  glossary, policy and quality modules, followed by exact-head CI and combined
+  private deployment when connectivity returns. Rollback is a protected revert
+  of #96; no database rollback is required.
+
 ## Latest verified R01 checkpoint — 2026-11-26
 
 - [PR #86](https://github.com/sameranism/ETEMAD-pre/pull/86) merged exact
