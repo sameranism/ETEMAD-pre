@@ -1,6 +1,44 @@
 # ETEMAD execution state
 
-## Latest verified operational checkpoint — 2026-11-26
+## Latest verified R01 checkpoint — 2026-11-26
+
+- [PR #86](https://github.com/sameranism/ETEMAD-pre/pull/86) merged exact
+  head `80b8e7047d67e081302bb79c71cda581deba5d16` through protected squash as
+  signed main `d7babb1c1c2666a155f207f8cc42b611f8469b59`. The private VPS runtime
+  is the same SHA. Exact-head and exact-main backend CI on PostgreSQL 18,
+  contract/boundary checks, CodeQL and Merge Guardian passed; run links and the
+  complete operational record are in
+  [Issue #78 comment 7200584033](https://github.com/sameranism/ETEMAD-pre/issues/78#issuecomment-7200584033).
+- Scope delivered: content-addressed P03 domestic/foreign source snapshots,
+  P05-owned persisted domestic snapshot/entries, crash-safe leased poll claims,
+  and an authenticated RTL source registry view. Frozen contracts and database
+  ownership boundaries were unchanged. Changed files are the P03 service,
+  application composition/pipeline, P05 scheduler and additive domestic
+  migration `003_source_snapshots`, their backend tests, and the source UI,
+  application wiring and frontend tests (11 files total).
+- Private deployment evidence: separate readable pre-deploy custom-format
+  backups for central/domestic/foreign, prior release `8334275c...` retained,
+  domestic migration `002 -> 003`, health/UI 200, anonymous sources/news 401
+  and listener restricted to `127.0.0.1:8765`.
+- Fixture-only operational check: one approved synthetic domestic source, zero
+  foreign sources, one persisted snapshot/entry, no duplicate concurrent claim,
+  successful reclaim after service reconstruction and zero claims left active.
+  Synthetic staff first-login/reset and authorized source read returned 200;
+  the account was disabled and its grant revoked immediately. No live fetch,
+  external provider, real credential, publication, public access or cost was used.
+- Local affected checks: Ruff PASS, Mypy PASS (35 source files), contract
+  validation PASS (30 schemas/30 examples), Gate-00 foundation PASS (62
+  preflights/336 negative contract cases), boundaries PASS, 176 backend tests
+  PASS with three PostgreSQL-only local skips, frontend build PASS and 10 tests
+  PASS. PostgreSQL cases passed in mandatory CI. These counts are verification,
+  not task-matrix acceptance.
+- Gate-00 and Gate-01 formal status is unchanged. The 223/216/7 matrix remains
+  authoritative. Next R01 point: independently configurable domestic schedule
+  and checkpoint behavior; after its protected delivery, continue R02 foreign
+  discovery/ingestion. Rollback uses the retained previous release plus the
+  verified three-database backup through a protected change.
+
+## Prior verified operational checkpoint — 2026-11-26
 
 - Protected main and the active private VPS release are both
   `97eb055c82419a6017440d6c9f3e75e862b57c02` from

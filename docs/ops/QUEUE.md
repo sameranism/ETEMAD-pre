@@ -16,9 +16,33 @@ The original 223-task matrix, prompts and package/project IDs remain unchanged. 
 | R08 | P27; active S02/S08 | UI delivered with each capability; complete dashboard |
 | R09 | S09/S10, deferred P28 | Applicable integration, backup/restore, advanced security and release |
 
-For each slice read original manifest, prompt and references, implement only owned changes, run affected checks and mandatory CI, merge through protected PR, verify a private VPS deployment once when permitted, log actual evidence and continue. Unrelated blockers do not stop independent eligible work. See [ADR-019](../decisions/ADR-019-product-first-delivery.md). R01/S01-005 is the next implementation. Do not merge temporary test workflows or infer acceptance from file counts.
+For each slice read original manifest, prompt and references, implement only owned changes, run affected checks and mandatory CI, merge through protected PR, verify a private VPS deployment once when permitted, log actual evidence and continue. Unrelated blockers do not stop independent eligible work. See [ADR-019](../decisions/ADR-019-product-first-delivery.md). R01/P03 source persistence and the versioned snapshot/durable-claim slice are delivered; the next implementation is independently configurable domestic scheduling/checkpoint behavior, followed by R02. Do not merge temporary test workflows or infer acceptance from file counts.
 
 ## Current delivery checkpoint — 2026-11-26
+
+- WIP=1 capability [PR #86](https://github.com/sameranism/ETEMAD-pre/pull/86)
+  is merged at signed main `d7babb1c1c2666a155f207f8cc42b611f8469b59`
+  and deployed on the private loopback VPS at the same SHA.
+- Delivered R01 scope: versioned/content-addressed domestic and foreign source
+  snapshots, P05-owned persistent domestic snapshot state, lease-based durable
+  claims with duplicate exclusion and restart reclaim, plus the authenticated
+  RTL source registry view. Existing fixture defaults and output-off controls
+  remain unchanged.
+- Exact-head and exact-main required CI, CodeQL, contracts/boundaries and
+  Guardian passed. Pre-deploy backups for all three databases were verified;
+  prior release `8334275c...` remains the rollback release. Operational
+  evidence is recorded in
+  [Issue #78](https://github.com/sameranism/ETEMAD-pre/issues/78#issuecomment-7200584033).
+- Synthetic-only verification passed for snapshot persistence, domestic/foreign
+  separation, claim exclusion/recovery, first-login/reset and authorized source
+  read. The temporary account is disabled, its grant revoked and no claim remains.
+- This is scoped delivery, not Gate-00/Gate-01 closure or acceptance inferred
+  from test/file counts. Next WIP=1 capability: independently configurable
+  domestic scheduling/checkpoint behavior; then R02 foreign discovery/ingestion.
+  Live sources, external providers, publication, public access and production
+  activation remain unauthorized.
+
+## Prior delivery checkpoint — 2026-11-26
 
 - R1 staff login/reset/revocation behavior from PR #82 is integrated, deployed
   privately and operationally verified with a synthetic account on exact release
