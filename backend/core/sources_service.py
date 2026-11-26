@@ -7,6 +7,7 @@ be enabled by a side door.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -38,12 +39,18 @@ class SourceService:
     registry_id: str = "default"
     _sources: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     _lock: Lock = field(default_factory=Lock, repr=False)
+    _updated_at: datetime = field(
+        default_factory=lambda: datetime.now(timezone.utc), repr=False
+    )
 
     def register(self, source: Mapping[str, Any]) -> dict[str, Any]:
         candidate = dict(source)
         self._validate_with([candidate])
         with self._lock:
-            self._sources[str(candidate["source_id"])] = candidate
+            source_id = str(candidate["source_id"])
+            if self._sources.get(source_id) != candidate:
+                self._sources[source_id] = candidate
+                self._updated_at = datetime.now(timezone.utc)
         return dict(candidate)
 
     def set_enabled(self, source_id: str, enabled: bool) -> dict[str, Any]:
@@ -53,7 +60,9 @@ class SourceService:
                 raise SourceNotFound(source_id)
             updated = dict(source)
             updated["enabled"] = bool(enabled)
-            self._sources[source_id] = updated
+            if updated != source:
+                self._sources[source_id] = updated
+                self._updated_at = datetime.now(timezone.utc)
         self._validate_with(list(self._sources.values()))
         return dict(updated)
 
@@ -82,6 +91,21 @@ class SourceService:
             raise SourceNotAllowed(f"source {source_id} does not serve stream {stream!r}")
         return source
 
+    def snapshot(self, stream: str) -> dict[str, Any]:
+        """Return a stable, rights-cleared stream snapshot for P05/P06.
+
+        Snapshot identifiers are content-addressed. Consumers can persist and
+        replay them without querying the central source database.
+        """
+        with self._lock:
+            updated_at = self._updated_at
+        return _build_stream_snapshot(
+            registry_id=self.registry_id,
+            stream=stream,
+            sources=self.list(),
+            updated_at=updated_at,
+        )
+
     def document(self) -> dict[str, Any]:
         """The full ``source_registry`` record, validated before return."""
         record = {
@@ -103,6 +127,33 @@ class SourceService:
                 "sources": sources,
             },
         )
+
+
+def _build_stream_snapshot(
+    *, registry_id: str, stream: str, sources: List[dict[str, Any]], updated_at: datetime,
+) -> dict[str, Any]:
+    if stream not in {"domestic", "foreign"}:
+        raise ValueError("source snapshot stream must be domestic or foreign")
+    selected = [
+        dict(source) for source in sources
+        if source["stream"] == stream
+        and source["enabled"]
+        and source["license_scope"] != BLOCKED_SCOPE
+    ]
+    selected.sort(key=lambda source: source["source_id"])
+    canonical = json.dumps(
+        {"stream": stream, "sources": selected},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(canonical).hexdigest()
+    record = {
+        "schema_version": "1.0",
+        "registry_id": f"{registry_id}:{stream}:{digest}",
+        "updated_at": updated_at.astimezone(timezone.utc).isoformat(),
+        "sources": selected,
+    }
+    validate_payload("source_registry", record)
+    return record
 
 
 def _normalized_url(value: str) -> str:
@@ -233,6 +284,24 @@ class PostgresSourceService(SourceService):
             """)).scalars().all()
         candidates = [self._prepare(snapshot)[0] for snapshot in snapshots]
         return [s for s in candidates if s["enabled"]] if enabled_only else candidates
+
+    def snapshot(self, stream: str) -> dict[str, Any]:
+        with self._engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT snapshot, updated_at FROM sources.source_registry
+                ORDER BY source_id
+            """)).mappings().all()
+        sources = [self._prepare(row["snapshot"])[0] for row in rows]
+        updated_at = max(
+            (row["updated_at"] for row in rows),
+            default=datetime(1970, 1, 1, tzinfo=timezone.utc),
+        )
+        return _build_stream_snapshot(
+            registry_id=self.registry_id,
+            stream=stream,
+            sources=sources,
+            updated_at=updated_at,
+        )
 
     def history(self, source_id: str) -> List[dict[str, Any]]:
         """Return ordered internal revisions without exposing credentials."""

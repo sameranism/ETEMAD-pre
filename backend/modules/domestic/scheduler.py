@@ -6,14 +6,18 @@ interval up to one hour, and a successful poll resets it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Lock
-from typing import Mapping
+from typing import Any, Callable, Mapping
+from uuid import uuid4
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine, RowMapping
 
+from backend.core.contracts import validate_payload
 from backend.core.db import DatabaseRegistry
 
 BASE_INTERVAL_SECONDS = 300
@@ -83,6 +87,222 @@ class PollStateStore:
 
 class PollStateConflict(RuntimeError):
     """The persisted state changed after this poll loaded its snapshot."""
+
+
+@dataclass(frozen=True)
+class PollClaim:
+    source_id: str
+    snapshot_id: str
+    claim_token: str
+    worker_id: str
+    claimed_until: str
+    source: Mapping[str, Any]
+
+
+def _snapshot_payload(document: Mapping[str, Any]) -> tuple[str, str, list[dict[str, Any]]]:
+    record = dict(document)
+    validate_payload("source_registry", record)
+    snapshot_id = str(record["registry_id"])
+    sources = [dict(source) for source in record["sources"]]
+    if not snapshot_id or any(
+        source["stream"] != "domestic"
+        or source["enabled"] is not True
+        or source["license_scope"] == "unknown"
+        for source in sources
+    ):
+        raise ValueError("domestic snapshot must contain only enabled rights-cleared sources")
+    source_content = json.dumps(
+        {"stream": "domestic", "sources": sources},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    expected_suffix = hashlib.sha256(source_content).hexdigest()
+    if snapshot_id.rsplit(":", 1)[-1] != expected_suffix:
+        raise ValueError("domestic snapshot identifier is not content-addressed")
+    canonical = json.dumps(
+        record, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return snapshot_id, hashlib.sha256(canonical).hexdigest(), sources
+
+
+class ScheduleStore:
+    """Fixture snapshot and lease store; PostgreSQL is authoritative in staging."""
+
+    def __init__(
+        self, poll_states: PollStateStore, *, clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._poll_states = poll_states
+        self._clock = clock or _now
+        self._snapshot_id: str | None = None
+        self._sources: dict[str, dict[str, Any]] = {}
+        self._claims: dict[str, tuple[str, datetime]] = {}
+        self._schedule_lock = Lock()
+
+    def apply_snapshot(self, document: Mapping[str, Any]) -> str:
+        snapshot_id, _digest, sources = _snapshot_payload(document)
+        with self._schedule_lock:
+            self._snapshot_id = snapshot_id
+            self._sources = {str(source["source_id"]): source for source in sources}
+            for source_id in self._sources:
+                self._poll_states.get_or_create(source_id)
+        return snapshot_id
+
+    def claim_due(
+        self, *, worker_id: str, limit: int = 10, lease_seconds: int = 120,
+    ) -> list[PollClaim]:
+        if not worker_id or not 1 <= limit <= 100 or not 30 <= lease_seconds <= 900:
+            raise ValueError("invalid poll claim")
+        now = self._clock().astimezone(timezone.utc)
+        with self._schedule_lock:
+            if self._snapshot_id is None:
+                return []
+            claims: list[PollClaim] = []
+            for source_id in sorted(self._sources):
+                if len(claims) >= limit:
+                    break
+                existing = self._claims.get(source_id)
+                if existing is not None and existing[1] > now:
+                    continue
+                state = self._poll_states.get_or_create(source_id)
+                if not should_poll(state, now):
+                    continue
+                token = str(uuid4())
+                expiry = now + timedelta(seconds=lease_seconds)
+                self._claims[source_id] = (token, expiry)
+                claims.append(PollClaim(
+                    source_id=source_id,
+                    snapshot_id=self._snapshot_id,
+                    claim_token=token,
+                    worker_id=worker_id,
+                    claimed_until=expiry.isoformat(),
+                    source=dict(self._sources[source_id]),
+                ))
+            return claims
+
+    def release(self, claim: PollClaim) -> None:
+        with self._schedule_lock:
+            existing = self._claims.get(claim.source_id)
+            if existing is None or existing[0] != claim.claim_token:
+                raise PollStateConflict("poll claim is no longer current")
+            del self._claims[claim.source_id]
+
+
+class PostgresScheduleStore(ScheduleStore):
+    """P05-owned durable source snapshots and crash-safe polling leases."""
+
+    def __init__(self, registry: DatabaseRegistry, poll_states: PostgresPollStateStore) -> None:
+        self._registry = registry
+        self._poll_states = poll_states
+
+    def _engine(self) -> Engine:
+        engine = self._registry.engine("domestic")
+        if engine.dialect.name != "postgresql":
+            raise ValueError("poll scheduling requires PostgreSQL")
+        return engine
+
+    def apply_snapshot(self, document: Mapping[str, Any]) -> str:
+        snapshot_id, digest, sources = _snapshot_payload(document)
+        payload = json.dumps(dict(document), ensure_ascii=False, sort_keys=True)
+        with self._engine().begin() as conn:
+            conn.execute(text("""
+                INSERT INTO domestic.source_snapshots
+                    (snapshot_id, stream, content_hash, payload)
+                VALUES (:snapshot_id, 'domestic', :digest, CAST(:payload AS jsonb))
+                ON CONFLICT (snapshot_id) DO NOTHING
+            """), {"snapshot_id": snapshot_id, "digest": digest, "payload": payload})
+            stored = conn.execute(text("""
+                SELECT content_hash FROM domestic.source_snapshots
+                WHERE snapshot_id = :snapshot_id
+            """), {"snapshot_id": snapshot_id}).scalar_one()
+            if stored != digest:
+                raise ValueError("snapshot identifier conflicts with stored content")
+            for source in sources:
+                conn.execute(text("""
+                    INSERT INTO domestic.source_snapshot_entries
+                        (snapshot_id, source_id, config)
+                    VALUES (:snapshot_id, :source_id, CAST(:config AS jsonb))
+                    ON CONFLICT (snapshot_id, source_id) DO NOTHING
+                """), {
+                    "snapshot_id": snapshot_id,
+                    "source_id": source["source_id"],
+                    "config": json.dumps(source, ensure_ascii=False, sort_keys=True),
+                })
+                conn.execute(text("""
+                    INSERT INTO domestic.poll_state (source_id)
+                    VALUES (:source_id) ON CONFLICT (source_id) DO NOTHING
+                """), {"source_id": source["source_id"]})
+            conn.execute(text("""
+                INSERT INTO domestic.current_source_snapshot (stream, snapshot_id)
+                VALUES ('domestic', :snapshot_id)
+                ON CONFLICT (stream) DO UPDATE SET snapshot_id = EXCLUDED.snapshot_id,
+                    activated_at = now()
+            """), {"snapshot_id": snapshot_id})
+        return snapshot_id
+
+    def claim_due(
+        self, *, worker_id: str, limit: int = 10, lease_seconds: int = 120,
+    ) -> list[PollClaim]:
+        if not worker_id or len(worker_id) > 128 or not 1 <= limit <= 100 or not 30 <= lease_seconds <= 900:
+            raise ValueError("invalid poll claim")
+        with self._engine().begin() as conn:
+            rows = conn.execute(text("""
+                SELECT p.source_id, current.snapshot_id, entry.config
+                FROM domestic.current_source_snapshot AS current
+                JOIN domestic.source_snapshot_entries AS entry
+                  ON entry.snapshot_id = current.snapshot_id
+                JOIN domestic.poll_state AS p ON p.source_id = entry.source_id
+                LEFT JOIN domestic.poll_claims AS claim ON claim.source_id = p.source_id
+                WHERE current.stream = 'domestic'
+                  AND (p.next_poll_at IS NULL OR p.next_poll_at <= now())
+                  AND (claim.source_id IS NULL OR claim.claimed_until <= now())
+                ORDER BY p.next_poll_at NULLS FIRST, p.source_id
+                FOR UPDATE OF p SKIP LOCKED
+                LIMIT :limit
+            """), {"limit": limit}).mappings().all()
+            claims: list[PollClaim] = []
+            for row in rows:
+                token = str(uuid4())
+                expiry = conn.execute(text("""
+                    INSERT INTO domestic.poll_claims
+                        (source_id, snapshot_id, claim_token, worker_id, claimed_until)
+                    VALUES (
+                        :source_id, :snapshot_id, :token, :worker_id,
+                        now() + make_interval(secs => :lease_seconds)
+                    )
+                    ON CONFLICT (source_id) DO UPDATE SET
+                        snapshot_id = EXCLUDED.snapshot_id,
+                        claim_token = EXCLUDED.claim_token,
+                        worker_id = EXCLUDED.worker_id,
+                        claimed_at = now(),
+                        claimed_until = EXCLUDED.claimed_until
+                    WHERE domestic.poll_claims.claimed_until <= now()
+                    RETURNING claimed_until
+                """), {
+                    "source_id": row["source_id"],
+                    "snapshot_id": row["snapshot_id"],
+                    "token": token,
+                    "worker_id": worker_id,
+                    "lease_seconds": lease_seconds,
+                }).scalar_one_or_none()
+                if expiry is None:
+                    continue
+                claims.append(PollClaim(
+                    source_id=row["source_id"],
+                    snapshot_id=row["snapshot_id"],
+                    claim_token=token,
+                    worker_id=worker_id,
+                    claimed_until=expiry.astimezone(timezone.utc).isoformat(),
+                    source=dict(row["config"]),
+                ))
+            return claims
+
+    def release(self, claim: PollClaim) -> None:
+        with self._engine().begin() as conn:
+            result = conn.execute(text("""
+                DELETE FROM domestic.poll_claims
+                WHERE source_id = :source_id AND claim_token = :token
+            """), {"source_id": claim.source_id, "token": claim.claim_token})
+            if result.rowcount != 1:
+                raise PollStateConflict("poll claim is no longer current")
 
 
 def _utc_timestamp(value: str | None) -> str | None:

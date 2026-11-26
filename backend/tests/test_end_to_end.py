@@ -21,6 +21,7 @@ from backend.modules.domestic.scheduler import (
     PollState,
     PollStateConflict,
     PostgresPollStateStore,
+    PostgresScheduleStore,
     record_failure,
 )
 
@@ -76,6 +77,17 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
                 "license_scope": "summary", "enabled": True,
             }
             first.sources.register(source)
+            snapshot_id = first.pipeline.sync_domestic_snapshot()
+            assert snapshot_id.startswith("default:domestic:")
+            assert first.sources.snapshot("foreign")["sources"] == []
+            claims = first.pipeline.schedules.claim_due(worker_id="worker-a")
+            assert len(claims) == 1
+            assert claims[0].source_id == SOURCE_ID
+            assert first.pipeline.schedules.claim_due(worker_id="worker-b") == []
+            first.pipeline.schedules.release(claims[0])
+            replacement_claim = first.pipeline.schedules.claim_due(worker_id="worker-b")
+            assert len(replacement_claim) == 1
+            first.pipeline.schedules.release(replacement_claim[0])
             assert isinstance(first.transport, FixtureFeedTransport)
             first.transport.responses = {
                 FEED_URL: FeedResponse(url=FEED_URL, status_code=200, body=RSS, etag='"cloud-v1"')
@@ -124,6 +136,9 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
             second.grants.grant(Grant("eic-test", "editor_in_chief", "newsroom", "feed", "read"))
             assert isinstance(second.transport, FixtureFeedTransport)
             assert isinstance(second.pipeline.poll_states, PostgresPollStateStore)
+            assert isinstance(second.pipeline.schedules, PostgresScheduleStore)
+            assert second.pipeline.sync_domestic_snapshot() == snapshot_id
+            assert second.pipeline.schedules.claim_due(worker_id="worker-restart") == []
             second.transport.responses = {FEED_URL: FeedResponse(
                 url=FEED_URL, status_code=200, body=RSS, etag='"cloud-v1"'
             )}
@@ -162,6 +177,11 @@ def test_postgres_news_api_persists_across_app_restart(monkeypatch, tmp_path):
                     conflict = client.post(f"/v1/ingest/{SOURCE_ID}/poll", headers=headers)
                     assert conflict.status_code == 409
                     assert conflict.json()["code"] == "conflict"
+
+                second.sources.set_enabled(SOURCE_ID, False)
+                disabled_snapshot = second.pipeline.sync_domestic_snapshot()
+                assert disabled_snapshot != snapshot_id
+                assert second.pipeline.schedules.claim_due(worker_id="worker-disabled") == []
             assert len(second.pipeline.repository) == len(second.pipeline.processed) == 1
         finally:
             for service in services:

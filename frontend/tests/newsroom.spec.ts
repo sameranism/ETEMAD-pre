@@ -2,8 +2,9 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import App, { parseNewsFeed } from "../src/app/App";
-import NewsDesk from "../src/features/newsroom/NewsDesk";
 import Login from "../src/features/auth/Login";
+import NewsDesk from "../src/features/newsroom/NewsDesk";
+import SourcesManager, { parseSources } from "../src/features/sources/SourcesManager";
 import { parseAuthResult } from "../src/lib/auth";
 
 const item = {
@@ -59,7 +60,6 @@ describe("authenticated newsroom projection", () => {
   });
 });
 
-
 describe("staff session", () => {
   it("renders a personal credential form without prefilled credentials", () => {
     const html = renderToStaticMarkup(createElement(Login, { onSession: () => {} }));
@@ -79,5 +79,52 @@ describe("staff session", () => {
     expect(parseAuthResult({
       schema_version: "1.0", must_reset: false, token_type: "bearer", access_token: "fixture", expires_in: 900,
     })).toEqual({ mustReset: false, token: "fixture", expiresIn: 900 });
+  });
+});
+
+describe("source registry", () => {
+  const domestic = {
+    source_id: "SRC-IR-1", site_url: "https://example.invalid",
+    feed_url: "https://example.invalid/rss", country: "IR", language: "fa",
+    stream: "domestic", license_scope: "summary", enabled: true,
+  } as const;
+  const foreignCandidate = {
+    ...domestic, source_id: "SRC-DE-1", country: "DE",
+    stream: "foreign", enabled: false,
+  } as const;
+
+  it("renders approved domestic sources and keeps foreign candidates inactive", () => {
+    const sources = parseSources({
+      schema_version: "1.0", sources: [foreignCandidate, domestic],
+    });
+    const html = renderToStaticMarkup(createElement(SourcesManager, { sources }));
+    expect(html).toContain("SRC-IR-1");
+    expect(html).toContain("فعال · دامنه حق استفاده");
+    expect(html).toContain("نامزد خارجی غیرفعال");
+  });
+
+  it("rejects malformed, duplicate and non-http source records", () => {
+    expect(() => parseSources({ schema_version: "1.0", sources: [
+      { ...domestic, site_url: "javascript:alert(1)" },
+    ] })).toThrow();
+    expect(() => parseSources({
+      schema_version: "1.0", sources: [domestic, domestic],
+    })).toThrow();
+    expect(() => parseSources({ schema_version: "1.0", sources: [
+      { ...domestic, enabled: "yes" },
+    ] })).toThrow();
+    expect(() => parseSources({ schema_version: "1.0", sources: [
+      { ...domestic, site_url: "http://" },
+    ] })).toThrow();
+    const { feed_url: _omitted, ...withoutFeed } = domestic;
+    expect(parseSources({ schema_version: "1.0", sources: [withoutFeed] })).toHaveLength(1);
+  });
+
+  it("does not show source data when access is denied", () => {
+    const html = renderToStaticMarkup(createElement(SourcesManager, {
+      sources: [domestic], state: "forbidden",
+    }));
+    expect(html).toContain("دسترسی به دفتر منابع مجاز نیست");
+    expect(html).not.toContain("SRC-IR-1");
   });
 });
