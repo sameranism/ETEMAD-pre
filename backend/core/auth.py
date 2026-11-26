@@ -117,8 +117,9 @@ def issue_session(principal: Principal, key: bytes, *, ttl_seconds: int = 3600) 
         "role": principal.role,
         "reset": principal.must_reset_password,
         "exp": int(time.time()) + ttl_seconds,
-        "marker": principal.session_marker,
     }
+    if principal.session_marker is not None:
+        payload["marker"] = principal.session_marker
     body = _b64(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     return f"{_TOKEN_VERSION}.{body}.{_sign(key, body.encode('ascii'))}"
 
@@ -129,7 +130,8 @@ def verify_session(token: str, key: bytes, *, now: int | None = None) -> Princip
         version, body, signature = token.split(".")
     except (AttributeError, ValueError) as exc:
         raise SessionInvalid("malformed token") from exc
-    if version != _TOKEN_VERSION or not body or not signature:
+    if (version != _TOKEN_VERSION or not body or not signature or len(token) > 4096
+            or not body.isascii() or not signature.isascii()):
         raise SessionInvalid("unsupported token")
     expected = _sign(key, body.encode("ascii"))
     if not hmac.compare_digest(signature, expected):
@@ -140,7 +142,8 @@ def verify_session(token: str, key: bytes, *, now: int | None = None) -> Princip
         raise SessionInvalid("malformed payload") from exc
     if not isinstance(payload, Mapping):
         raise SessionInvalid("malformed payload")
-    if int(payload.get("exp", 0)) <= (int(time.time()) if now is None else now):
+    expiry = payload.get("exp")
+    if type(expiry) is not int or expiry <= (int(time.time()) if now is None else now):
         raise SessionInvalid("expired token")
     try:
         return Principal(
@@ -258,6 +261,7 @@ class PostgresAccountStore:
             raise ValueError("replacement must differ from initial credential")
         encoded = hash_password(replacement)
         with self._engine().begin() as conn:
+            conn.execute(text("LOCK TABLE identity.users IN SHARE ROW EXCLUSIVE MODE"))
             row = conn.execute(text("""
                 SELECT user_id, role_id, password_hash, must_reset, is_active
                 FROM identity.users WHERE username = :username FOR UPDATE
@@ -267,6 +271,11 @@ class PostgresAccountStore:
                 raise AuthenticationError("invalid credentials")
             if not verify_password(temporary, row["password_hash"]):
                 raise AuthenticationError("invalid credentials")
+            other_hashes = conn.execute(text("""
+                SELECT password_hash FROM identity.users WHERE is_active AND user_id <> :id
+            """), {"id": row["user_id"]}).scalars().all()
+            if any(verify_password(replacement, other_hash) for other_hash in other_hashes):
+                raise ValueError("replacement must be unique")
             conn.execute(text("""
                 UPDATE identity.users SET password_hash = :encoded, must_reset = false
                 WHERE user_id = :id
