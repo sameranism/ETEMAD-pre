@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Callable, Mapping
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine, RowMapping
@@ -28,11 +29,41 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def next_interval_seconds(consecutive_failures: int) -> int:
-    """Exponential backoff, capped; zero failures means the base interval."""
+def _validate_interval(seconds: int) -> int:
+    if type(seconds) is not int or not 60 <= seconds <= 86400:
+        raise ValueError("poll interval must be between one minute and one day")
+    return seconds
+
+
+@dataclass(frozen=True)
+class DomesticPollPlan:
+    """A P02-provided interval schedule for the domestic ingestion worker only."""
+
+    enabled: bool
+    interval_seconds: int
+
+    @classmethod
+    def from_record(cls, record: Mapping[str, Any]) -> DomesticPollPlan:
+        validate_payload("schedule_config", record)
+        if (record["stream"] != "domestic" or record["desk"] != "all"
+                or record["mode"] != "interval" or record["fixed_times_local"]
+                or type(record["interval_minutes"]) is not int):
+            raise ValueError("domestic ingest requires a domestic all-desk interval schedule")
+        try:
+            ZoneInfo(record["timezone"])
+        except (ValueError, ZoneInfoNotFoundError) as exc:
+            raise ValueError("invalid schedule timezone") from exc
+        return cls(record["enabled"], _validate_interval(record["interval_minutes"] * 60))
+
+
+def next_interval_seconds(
+    consecutive_failures: int, *, base_interval_seconds: int = BASE_INTERVAL_SECONDS,
+) -> int:
+    """Back off without ever shortening the configured interval."""
+    base = _validate_interval(base_interval_seconds)
     if consecutive_failures <= 0:
-        return BASE_INTERVAL_SECONDS
-    return min(BASE_INTERVAL_SECONDS * (2 ** min(consecutive_failures, 5)), MAX_INTERVAL_SECONDS)
+        return base
+    return min(base * (2 ** min(consecutive_failures, 5)), max(base, MAX_INTERVAL_SECONDS))
 
 
 @dataclass
@@ -178,6 +209,16 @@ class ScheduleStore:
                 ))
             return claims
 
+    def is_current(self, claim: PollClaim) -> bool:
+        now = self._clock().astimezone(timezone.utc)
+        with self._schedule_lock:
+            existing = self._claims.get(claim.source_id)
+            return bool(
+                existing is not None and existing[0] == claim.claim_token and existing[1] > now
+                and self._snapshot_id == claim.snapshot_id
+                and self._sources.get(claim.source_id) == dict(claim.source)
+            )
+
     def release(self, claim: PollClaim) -> None:
         with self._schedule_lock:
             existing = self._claims.get(claim.source_id)
@@ -294,6 +335,24 @@ class PostgresScheduleStore(ScheduleStore):
                     source=dict(row["config"]),
                 ))
             return claims
+
+    def is_current(self, claim: PollClaim) -> bool:
+        with self._engine().connect() as conn:
+            config = conn.execute(text("""
+                SELECT entry.config
+                FROM domestic.poll_claims AS claim
+                JOIN domestic.current_source_snapshot AS current
+                  ON current.snapshot_id = claim.snapshot_id AND current.stream = 'domestic'
+                JOIN domestic.source_snapshot_entries AS entry
+                  ON entry.snapshot_id = claim.snapshot_id AND entry.source_id = claim.source_id
+                WHERE claim.source_id = :source_id AND claim.claim_token = :token
+                  AND claim.worker_id = :worker_id AND claim.claimed_until > now()
+                  AND claim.snapshot_id = :snapshot_id
+            """), {
+                "source_id": claim.source_id, "token": claim.claim_token,
+                "worker_id": claim.worker_id, "snapshot_id": claim.snapshot_id,
+            }).scalar_one_or_none()
+        return config is not None and config == dict(claim.source)
 
     def release(self, claim: PollClaim) -> None:
         with self._engine().begin() as conn:
@@ -440,14 +499,16 @@ def record_success(
     etag: str | None,
     last_modified: str | None,
     now: datetime | None = None,
+    interval_seconds: int = BASE_INTERVAL_SECONDS,
 ) -> PollState:
+    interval = _validate_interval(interval_seconds)
     moment = now or _now()
     state.etag = etag or state.etag
     state.last_modified = last_modified or state.last_modified
     state.last_success_at = moment.isoformat()
     state.last_error = None
     state.consecutive_failures = 0
-    state.next_poll_at = (moment + timedelta(seconds=BASE_INTERVAL_SECONDS)).isoformat()
+    state.next_poll_at = (moment + timedelta(seconds=interval)).isoformat()
     return state
 
 
@@ -456,11 +517,13 @@ def record_failure(
     *,
     error: str,
     now: datetime | None = None,
+    interval_seconds: int = BASE_INTERVAL_SECONDS,
 ) -> PollState:
+    base = _validate_interval(interval_seconds)
     moment = now or _now()
     state.last_error = error[:200]
     state.consecutive_failures += 1
-    interval = next_interval_seconds(state.consecutive_failures)
+    interval = next_interval_seconds(state.consecutive_failures, base_interval_seconds=base)
     state.next_poll_at = (moment + timedelta(seconds=interval)).isoformat()
     return state
 
