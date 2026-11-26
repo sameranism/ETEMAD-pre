@@ -95,6 +95,7 @@ class Principal:
     subject_id: str
     role: str
     must_reset_password: bool = False
+    session_marker: str | None = None
 
     def __post_init__(self) -> None:
         if self.role not in ROLES:
@@ -116,6 +117,7 @@ def issue_session(principal: Principal, key: bytes, *, ttl_seconds: int = 3600) 
         "role": principal.role,
         "reset": principal.must_reset_password,
         "exp": int(time.time()) + ttl_seconds,
+        "marker": principal.session_marker,
     }
     body = _b64(json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"))
     return f"{_TOKEN_VERSION}.{body}.{_sign(key, body.encode('ascii'))}"
@@ -145,6 +147,7 @@ def verify_session(token: str, key: bytes, *, now: int | None = None) -> Princip
             subject_id=str(payload["sub"]),
             role=str(payload["role"]),
             must_reset_password=bool(payload.get("reset", False)),
+            session_marker=payload.get("marker") if isinstance(payload.get("marker"), str) else None,
         )
     except (KeyError, ValueError) as exc:
         raise SessionInvalid("invalid claims") from exc
@@ -171,8 +174,15 @@ class PostgresAccountStore:
     Provisioning is an explicit trusted operator action, not an HTTP endpoint.
     """
 
-    def __init__(self, registry: DatabaseRegistry) -> None:
+    def __init__(self, registry: DatabaseRegistry, marker_key: bytes) -> None:
         self._registry = registry
+        if len(marker_key) < 32:
+            raise ValueError("identity signing key must have at least 32 bytes")
+        self._marker_key = marker_key
+
+    def _principal(self, user_id: str, role: str, reset: bool, encoded: str) -> Principal:
+        marker = hmac.new(self._marker_key, b"account-marker\\0" + encoded.encode(), hashlib.sha256).hexdigest()
+        return Principal(user_id, role, reset, marker)
 
     def _engine(self) -> Engine:
         engine = self._registry.engine("central")
@@ -213,17 +223,17 @@ class PostgresAccountStore:
             raise AuthenticationError("invalid credentials")
         if not verify_password(password, row["password_hash"]):
             raise AuthenticationError("invalid credentials")
-        return Principal(row["user_id"], row["role_id"], row["must_reset"])
+        return self._principal(row["user_id"], row["role_id"], row["must_reset"], row["password_hash"])
 
     def current(self, user_id: str) -> Principal:
         with self._engine().connect() as conn:
             row = conn.execute(text("""
-                SELECT role_id, must_reset FROM identity.users
+                SELECT role_id, must_reset, password_hash FROM identity.users
                 WHERE user_id = :id AND is_active
             """), {"id": user_id}).mappings().one_or_none()
         if row is None or row["role_id"] != "staff":
             raise AuthenticationError("invalid credentials")
-        return Principal(user_id, row["role_id"], row["must_reset"])
+        return self._principal(user_id, row["role_id"], row["must_reset"], row["password_hash"])
 
     def reset_first_use(self, username: str, temporary: str, replacement: str) -> Principal:
         if temporary == replacement:
@@ -243,7 +253,7 @@ class PostgresAccountStore:
                 UPDATE identity.users SET password_hash = :encoded, must_reset = false
                 WHERE user_id = :id
             """), {"encoded": encoded, "id": row["user_id"]})
-            return Principal(row["user_id"], "staff")
+            return self._principal(row["user_id"], "staff", False, encoded)
 
 
 # Non-account random value: never a usable account credential.
