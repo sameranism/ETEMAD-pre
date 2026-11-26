@@ -6,6 +6,7 @@ import pytest
 
 from backend.modules.editorial.glossary import EditorialGlossary
 from backend.modules.editorial.policy import PolicyContext, SourceRights, evaluate_policy
+from backend.modules.editorial.quality import assess_quality
 
 NOW = datetime(2026, 11, 26, 20, tzinfo=timezone.utc)
 
@@ -105,3 +106,65 @@ def test_private_sensitive_and_unknown_rights_fail_closed():
                              context=context(sensitive=True, quality_passed=False), decided_at=NOW)
     assert result["decision"] == "human_review"
     assert "SOURCE_RIGHTS_UNKNOWN" in result["reason_codes"]
+
+
+
+def test_quality_passes_traceable_copy_without_mutation():
+    source = (
+        "خبرگزاری نمونه گفت: «بودجه ۱۲ میلیارد است». "
+        "علی رضایی توضیح داد."
+    )
+    original = deepcopy(source)
+    result = assess_quality(
+        source,
+        "علی رضایی گفت «بودجه ۱۲ میلیارد است».",
+        source_refs=("NEWS-FIXTURE",),
+        attributed_refs=("NEWS-FIXTURE",),
+        required_names=("علی رضایی",),
+        claim_evidence={
+            "بودجه ۱۲ میلیارد است": ("بودجه ۱۲ میلیارد است",),
+        },
+    )
+    assert result.passed
+    assert result.reason_codes == ("QUALITY_CHECKS_PASSED",)
+    assert result.evidence_refs[0] == "NEWS-FIXTURE"
+    assert source == original
+
+
+def test_quality_fails_closed_on_missing_attribution_and_changed_facts():
+    result = assess_quality(
+        "بودجه ۱۲ میلیارد است و علی رضایی توضیح داد.",
+        "بودجه ۱۵ میلیارد است.",
+        source_refs=("NEWS-FIXTURE",),
+        attributed_refs=(),
+        required_names=("علی رضایی",),
+        claim_evidence={"بودجه ۱۵ میلیارد است": ()},
+    )
+    assert not result.passed
+    assert set(result.reason_codes) == {
+        "ATTRIBUTION_MISSING",
+        "CLAIM_EVIDENCE_MISSING",
+        "FACT_NAME_MISMATCH",
+        "FACT_NUMBER_MISMATCH",
+    }
+
+
+def test_quality_rejects_untraceable_quotes_and_prohibited_terms():
+    result = assess_quality(
+        "متن منبع مجاز است.",
+        "او گفت «نقل قول ساختگی» و از عبارت ممنوع استفاده کرد.",
+        source_refs=(),
+        attributed_refs=(),
+        prohibited_terms=("عبارت ممنوع",),
+    )
+    assert set(result.reason_codes) == {
+        "CITATION_MISSING",
+        "FABRICATED_QUOTE",
+        "PROHIBITED_DISCRIMINATION",
+    }
+
+
+@pytest.mark.parametrize("source,draft", [("", "draft"), ("source", "")])
+def test_quality_requires_non_empty_text(source, draft):
+    with pytest.raises(ValueError):
+        assess_quality(source, draft, source_refs=(), attributed_refs=())
