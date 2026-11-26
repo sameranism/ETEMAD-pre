@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import App, { parseNewsFeed } from "../src/app/App";
 import Login from "../src/features/auth/Login";
+import ArticleEditor, { parseEditorialPreview } from "../src/features/editor/ArticleEditor";
 import NewsDesk from "../src/features/newsroom/NewsDesk";
 import SourcesManager, { ForeignMonitor, parseForeignStatus, parseSources } from "../src/features/sources/SourcesManager";
 import Settings, { parseDomesticSchedule, scheduleError } from "../src/features/settings/Settings";
@@ -173,5 +174,50 @@ describe("foreign monitor", () => {
     expect(html).toContain("جهان‌بان");
     expect(html).not.toContain("SRC-FIXTURE");
     expect(html).not.toContain("fixture-not-real");
+  });
+});
+
+describe("editorial preview", () => {
+  const response = {
+    schema_version: "1.0",
+    rules_version: "RULE-UI-PREVIEW:1",
+    original: "عبارت قدیمی",
+    proposed: "عبارت مصوب",
+    replacements: [{
+      rule_id: "RULE-UI-1",
+      original: "عبارت قدیمی",
+      proposed: "عبارت مصوب",
+      action: "applied",
+      reason: "UNAMBIGUOUS_DRAFT_RULE",
+    }],
+    quality: {
+      passed: true,
+      reason_codes: ["QUALITY_CHECKS_PASSED"],
+      evidence_refs: ["NEWS-FIXTURE", "quality:fixture"],
+      source_hash: "a".repeat(64),
+      draft_hash: "b".repeat(64),
+    },
+  } as const;
+
+  it("parses a backend quality result and rejects malformed evidence", () => {
+    expect(parseEditorialPreview(response).proposed).toBe("عبارت مصوب");
+    expect(() => parseEditorialPreview({
+      ...response,
+      quality: { ...response.quality, reason_codes: [false] },
+    })).toThrow();
+    expect(() => parseEditorialPreview({
+      ...response,
+      replacements: [{ ...response.replacements[0], action: "auto_allowed" }],
+    })).toThrow();
+  });
+
+  it("starts empty and never exposes the session token in markup", () => {
+    const html = renderToStaticMarkup(createElement(ArticleEditor, {
+      token: "fixture-not-a-real-token",
+    }));
+    expect(html).toContain("کنترل واژه‌نامه و کیفیت");
+    expect(html).toContain("پیش‌نمایش بدون انتشار");
+    expect(html).not.toContain("fixture-not-a-real-token");
+    expect(html).not.toContain("عبارت مصوب");
   });
 });

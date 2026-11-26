@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Login from "../features/auth/Login";
+import ArticleEditor from "../features/editor/ArticleEditor";
 import Settings from "../features/settings/Settings";
 import { authMode, type AuthMode } from "../lib/auth";
 import NewsDesk, { type NewsFeedRecord } from "../features/newsroom/NewsDesk";
@@ -203,6 +204,7 @@ export default function App() {
             <SourcesManager sources={sources} state={sourceState} />
             <ForeignMonitor key={token} token={token} />
             <Settings key={token} token={token} />
+            <ArticleEditor key={"editor-" + token} token={token} />
             <NewsDesk items={items} state={state} />
             {state === "error" && (
               <button type="button" onClick={() => {
