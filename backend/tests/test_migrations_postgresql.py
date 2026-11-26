@@ -88,8 +88,14 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             domestic = Config("alembic_domestic.ini")
             command.upgrade(domestic, "head")
             domestic_tables = tables("domestic")
-            assert len(domestic_tables) == 3
-            assert ("domestic", "raw_content_identity") in domestic_tables
+            assert len(domestic_tables) == 7
+            assert {
+                ("domestic", "raw_content_identity"),
+                ("domestic", "source_snapshots"),
+                ("domestic", "source_snapshot_entries"),
+                ("domestic", "current_source_snapshot"),
+                ("domestic", "poll_claims"),
+            } <= domestic_tables
             assert not domestic_tables & central_tables
             command.downgrade(domestic, "base")
             assert tables("domestic") == set()

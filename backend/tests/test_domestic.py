@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from backend.core.sources_service import SourceService
 from backend.modules.domestic.collector import (
     FeedParseError,
     collect,
@@ -25,6 +26,7 @@ from backend.modules.domestic.scheduler import (
     BASE_INTERVAL_SECONDS,
     MAX_INTERVAL_SECONDS,
     PollStateStore,
+    ScheduleStore,
     next_interval_seconds,
     record_failure,
     record_success,
@@ -46,7 +48,9 @@ RSS = """<?xml version="1.0" encoding="UTF-8"?>
 ATOM = """<?xml version="1.0" encoding="utf-8"?>
 <feed xmlns="http://www.w3.org/2005/Atom"><title>atom fixture</title>
 <entry><title>خبر خارجی</title><link href="https://example.com/atom/1"/>
-<summary>summary text</summary><updated>2026-11-23T08:00:00Z</updated></entry></feed>""".encode("utf-8")
+<summary>summary text</summary><updated>2026-11-23T08:00:00Z</updated></entry></feed>""".encode(
+    "utf-8"
+)
 
 SOURCE = {
     "source_id": "SRC-IR-01",
@@ -168,3 +172,42 @@ def test_poll_state_success_and_failure() -> None:
     assert state.etag == 'W/"2"'
     store.save(state)
     assert store.all()[0]["source_id"] == "SRC-IR-01"
+
+
+def test_source_snapshot_is_stable_scoped_and_rights_cleared() -> None:
+    sources = SourceService()
+    sources.register(SOURCE)
+    sources.register(
+        {
+            **SOURCE,
+            "source_id": "SRC-FR-01",
+            "site_url": "https://foreign.example",
+            "feed_url": None,
+            "country": "FR",
+            "language": "fr",
+            "stream": "foreign",
+            "license_scope": "unknown",
+            "enabled": False,
+        }
+    )
+    domestic = sources.snapshot("domestic")
+    assert domestic["registry_id"].startswith("default:domestic:")
+    assert domestic["sources"] == [SOURCE]
+    assert sources.snapshot("domestic") == domestic
+    assert sources.snapshot("foreign")["sources"] == []
+
+
+def test_schedule_rejects_tampered_or_foreign_snapshot() -> None:
+    sources = SourceService()
+    sources.register(SOURCE)
+    document = sources.snapshot("domestic")
+    schedule = ScheduleStore(PollStateStore())
+    assert schedule.apply_snapshot(document) == document["registry_id"]
+
+    with pytest.raises(ValueError, match="content-addressed"):
+        schedule.apply_snapshot({**document, "registry_id": "default:domestic:" + "0" * 64})
+
+    foreign_source = {**SOURCE, "stream": "foreign"}
+    sources.register(foreign_source)
+    with pytest.raises(ValueError, match="domestic snapshot"):
+        schedule.apply_snapshot(sources.snapshot("foreign"))

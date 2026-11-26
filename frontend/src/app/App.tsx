@@ -2,6 +2,9 @@ import { useEffect, useState, type FormEvent } from "react";
 import Login from "../features/auth/Login";
 import { authMode, type AuthMode } from "../lib/auth";
 import NewsDesk, { type NewsFeedRecord } from "../features/newsroom/NewsDesk";
+import SourcesManager, {
+  parseSources, type SourceRecord,
+} from "../features/sources/SourcesManager";
 
 type LoadState = "ready" | "loading" | "error" | "forbidden";
 
@@ -42,6 +45,8 @@ export function parseNewsFeed(value: unknown): NewsFeedRecord[] {
 export default function App() {
   const [items, setItems] = useState<NewsFeedRecord[]>([]);
   const [state, setState] = useState<LoadState>("forbidden");
+  const [sources, setSources] = useState<SourceRecord[]>([]);
+  const [sourceState, setSourceState] = useState<LoadState>("forbidden");
   const [token, setToken] = useState("");
   const [draft, setDraft] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -61,7 +66,8 @@ export default function App() {
   useEffect(() => {
     if (expiry === null || !token) return;
     const timer = window.setTimeout(() => {
-      setToken(""); setItems([]); setExpiry(null); setState("forbidden");
+      setToken(""); setItems([]); setSources([]); setExpiry(null);
+      setState("forbidden"); setSourceState("forbidden");
     }, Math.max(0, expiry - Date.now()));
     return () => window.clearTimeout(timer);
   }, [expiry, token]);
@@ -100,12 +106,49 @@ export default function App() {
     return () => controller.abort();
   }, [token, attempt]);
 
+  useEffect(() => {
+    if (!token) return;
+    const controller = new AbortController();
+    setSourceState("loading");
+    fetch("/v1/sources", {
+      signal: controller.signal,
+      credentials: "same-origin",
+      headers: { Authorization: "Bearer " + token, Accept: "application/json" },
+      cache: "no-store",
+      redirect: "error",
+    })
+      .then(async (response) => {
+        if (controller.signal.aborted) return;
+        if (response.status === 401 || response.status === 403) {
+          setSources([]);
+          setSourceState("forbidden");
+          return;
+        }
+        if (!response.ok) throw new Error("Source registry unavailable");
+        const data: unknown = await response.json();
+        const next = parseSources(data);
+        if (!controller.signal.aborted) {
+          setSources(next);
+          setSourceState("ready");
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setSources([]);
+          setSourceState("error");
+        }
+      });
+    return () => controller.abort();
+  }, [token, attempt]);
+
   function connect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const next = draft.trim();
     if (!next || mode !== "fixture") return;
     setItems([]);
+    setSources([]);
     setState("loading");
+    setSourceState("loading");
     setToken(next);
     setExpiry(null);
     setDraft("");
@@ -114,7 +157,9 @@ export default function App() {
 
   function staffSession(next: string, expiresIn: number) {
     setItems([]);
+    setSources([]);
     setState("loading");
+    setSourceState("loading");
     setExpiry(Date.now() + expiresIn * 1000);
     setToken(next);
     setAttempt((value) => value + 1);
@@ -125,7 +170,9 @@ export default function App() {
     setExpiry(null);
     setDraft("");
     setItems([]);
+    setSources([]);
     setState("forbidden");
+    setSourceState("forbidden");
   }
 
   return (
@@ -152,6 +199,7 @@ export default function App() {
           </form>
         ) : (
           <>
+            <SourcesManager sources={sources} state={sourceState} />
             <NewsDesk items={items} state={state} />
             {state === "error" && (
               <button type="button" onClick={() => {

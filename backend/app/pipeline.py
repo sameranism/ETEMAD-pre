@@ -15,8 +15,10 @@ from backend.modules.domestic.collector import collect
 from backend.modules.domestic.feed_client import FeedError, FeedTransport, fetch_with_retry
 from backend.modules.domestic.repository import PostgresRawNewsRepository, RawNewsRepository
 from backend.modules.domestic.scheduler import (
+    PollClaim,
     PollResult,
     PollStateStore,
+    ScheduleStore,
     record_failure,
     record_success,
 )
@@ -37,6 +39,7 @@ class IngestPipeline:
     sources: SourceService
     repository: RawNewsRepository | PostgresRawNewsRepository
     poll_states: PollStateStore
+    schedules: ScheduleStore
     transport: FeedTransport
     clusterer: Clusterer = field(default_factory=Clusterer)
     processed: ProcessingRepository | PostgresProcessingRepository = field(
@@ -44,9 +47,21 @@ class IngestPipeline:
     )
 
     # --- ingest -----------------------------------------------------------
-    def poll_source(self, source_id: str) -> PollResult:
+    def poll_source(
+        self, source_id: str, *, snapshot_source: Mapping[str, Any] | None = None,
+    ) -> PollResult:
         try:
-            source = self.sources.require_usable(source_id, stream="domestic")
+            if snapshot_source is None:
+                source = self.sources.require_usable(source_id, stream="domestic")
+            else:
+                source = dict(snapshot_source)
+                if (
+                    source.get("source_id") != source_id
+                    or source.get("stream") != "domestic"
+                    or source.get("enabled") is not True
+                    or source.get("license_scope") == "unknown"
+                ):
+                    raise ValueError("invalid domestic source snapshot")
         except Exception as exc:  # noqa: BLE001 - surfaced as a blocked poll, not a crash
             return PollResult(source_id=source_id, status="blocked", error=type(exc).__name__)
 
@@ -87,6 +102,25 @@ class IngestPipeline:
         record_success(state, etag=response.etag, last_modified=response.last_modified)
         self.poll_states.save(state)
         return PollResult(source_id=source_id, status="ok", collected=created, state=state.as_dict())
+
+    def sync_domestic_snapshot(self) -> str:
+        """Import the current P03 contract snapshot into P05-owned storage."""
+        return self.schedules.apply_snapshot(self.sources.snapshot("domestic"))
+
+    def claim_due(
+        self, *, worker_id: str, limit: int = 10, lease_seconds: int = 120,
+    ) -> list[PollClaim]:
+        self.sync_domestic_snapshot()
+        return self.schedules.claim_due(
+            worker_id=worker_id, limit=limit, lease_seconds=lease_seconds,
+        )
+
+    def poll_claim(self, claim: PollClaim) -> PollResult:
+        """Execute one leased fixture/live poll and always release its claim."""
+        try:
+            return self.poll_source(claim.source_id, snapshot_source=claim.source)
+        finally:
+            self.schedules.release(claim)
 
     # --- processing -------------------------------------------------------
     def process(self, raw_record: Mapping[str, Any]) -> ProcessingItem:
