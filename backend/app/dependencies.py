@@ -36,7 +36,7 @@ from backend.modules.domestic.feed_client import (
     HttpxFeedTransport,
 )
 from backend.modules.domestic.repository import PostgresRawNewsRepository, RawNewsRepository
-from backend.modules.domestic.scheduler import PollStateStore
+from backend.modules.domestic.scheduler import PollStateStore, PostgresPollStateStore
 from backend.modules.processing.repository import PostgresProcessingRepository, ProcessingRepository
 
 _LOG = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         sources=sources,
         repository=raw_repository,
         processed=processing_repository,
-        poll_states=PollStateStore(),
+        poll_states=PostgresPollStateStore(registry) if storage == "postgres" else PollStateStore(),
         transport=transport,
     )
 
