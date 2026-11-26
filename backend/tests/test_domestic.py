@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from backend.app.dependencies import build_services
+from backend.core.permissions import Grant
+from backend.core.settings_service import DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE
 from backend.core.sources_service import SourceService
 from backend.modules.domestic.collector import (
     FeedParseError,
@@ -25,6 +28,8 @@ from backend.modules.domestic.repository import RawNewsRepository
 from backend.modules.domestic.scheduler import (
     BASE_INTERVAL_SECONDS,
     MAX_INTERVAL_SECONDS,
+    DomesticPollPlan,
+    PollStateConflict,
     PollStateStore,
     ScheduleStore,
     next_interval_seconds,
@@ -211,3 +216,77 @@ def test_schedule_rejects_tampered_or_foreign_snapshot() -> None:
     sources.register(foreign_source)
     with pytest.raises(ValueError, match="domestic snapshot"):
         schedule.apply_snapshot(sources.snapshot("foreign"))
+
+
+def _ingest_schedule(*, enabled=True, minutes=2):
+    return {
+        "schema_version": "1.0", "config_id": DOMESTIC_INGEST_CONFIG_ID,
+        "stream": "domestic", "desk": "all", "timezone": "Asia/Tehran",
+        "mode": "interval", "fixed_times_local": [], "interval_minutes": minutes,
+        "enabled": enabled, "updated_at": "2026-11-26T08:00:00Z",
+    }
+
+
+def test_domestic_worker_uses_scoped_interval_and_disabled_sources() -> None:
+    services = build_services({})
+    assert isinstance(services.transport, FixtureFeedTransport)
+    services.transport.responses = {
+        str(SOURCE["feed_url"]): FeedResponse(
+            url=str(SOURCE["feed_url"]), status_code=200, body=RSS, etag='"worker-v1"',
+        ),
+    }
+    services.sources.register(SOURCE)
+    services.sources.register({
+        **SOURCE, "source_id": "SRC-FOREIGN", "stream": "foreign", "country": "DE",
+    })
+    services.sources.register({**SOURCE, "source_id": "SRC-DISABLED", "enabled": False})
+    assert services.run_domestic_schedule(worker_id="worker") == []
+    services.grants.grant(Grant(
+        "operator-fixture", "staff", "config",
+        f"schedule_config:{DOMESTIC_INGEST_SCOPE}:{DOMESTIC_INGEST_CONFIG_ID}", "update",
+    ))
+    def update(value, expected_revision):
+        return services.settings.update(
+            contract_name="schedule_config", config_id=DOMESTIC_INGEST_CONFIG_ID,
+            scope=DOMESTIC_INGEST_SCOPE, value=value, expected_revision=expected_revision,
+            actor_id="operator-fixture", actor_role="staff",
+        )
+    update(_ingest_schedule(), 0)
+    results = services.run_domestic_schedule(worker_id="worker")
+    assert len(results) == 1 and results[0].collected == 2
+    state = services.pipeline.poll_states.get_or_create(str(SOURCE["source_id"]))
+    assert datetime.fromisoformat(state.next_poll_at) - datetime.fromisoformat(state.last_success_at) == timedelta(minutes=2)
+    assert services.run_domestic_schedule(worker_id="worker") == []
+    update(_ingest_schedule(enabled=False), 1)
+    assert services.run_domestic_schedule(worker_id="worker") == []
+    assert len(services.pipeline.repository) == 2
+
+
+def test_claim_rechecks_current_approval_before_fetch() -> None:
+    services = build_services({})
+    services.sources.register(SOURCE)
+    assert isinstance(services.transport, FixtureFeedTransport)
+    services.transport.responses = {
+        str(SOURCE["feed_url"]): FeedResponse(
+            url=str(SOURCE["feed_url"]), status_code=200, body=RSS,
+        ),
+    }
+    claim = services.pipeline.claim_due(worker_id="worker", limit=1)[0]
+    services.sources.set_enabled(str(SOURCE["source_id"]), False)
+    result = services.pipeline.poll_claim(claim)
+    assert result.status == "blocked" and len(services.pipeline.repository) == 0
+    with pytest.raises(PollStateConflict):
+        services.pipeline.poll_claim(claim)
+    assert services.pipeline.claim_due(worker_id="worker") == []
+
+
+def test_domestic_interval_validation_and_backoff() -> None:
+    assert DomesticPollPlan.from_record(_ingest_schedule(minutes=7)).interval_seconds == 420
+    for invalid in (
+        {"stream": "foreign"}, {"mode": "fixed_times"}, {"interval_minutes": 0},
+        {"interval_minutes": 1441}, {"timezone": "not/a-timezone"},
+    ):
+        with pytest.raises(ValueError):
+            DomesticPollPlan.from_record({**_ingest_schedule(), **invalid})
+    assert next_interval_seconds(1, base_interval_seconds=120) == 240
+    assert next_interval_seconds(10, base_interval_seconds=7200) == 7200
