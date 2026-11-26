@@ -13,6 +13,8 @@
 - Before changing a package boundary or data flow, consult `source/technical/project_package_map.csv`, `source/technical/dependency_edges.csv` and `source/technical/database_dictionary.csv`. Keep P/B ownership fixed, protect `executive_private` through backend/DB/queue/retrieval boundaries, and retain the three separate PostgreSQL/queue environments.
 - Record actual commands, exit codes, positive and negative outcomes, merge and CI URLs, exact SHAs, gaps, rollback and next eligible task. Record absent reviews as NOT_REQUIRED under the current policy. Never infer acceptance from file presence or fabricated evidence.
 
+- [ADR-019](docs/decisions/ADR-019-product-first-delivery.md) is the owner-directed product-first scheduling overlay when merged. Follow the active queue R01–R09; defer further P28 administration/MFA and unrelated complex checks, not existing protection or live-release requirements. Relevant functional, contract, security and migration dependencies and native CI remain mandatory. An unrelated blocker cannot stop another independent eligible slice. Preserve original IDs, prompts, scope and contracts; record real delivery evidence.
+
 ## Non-destructive modular development
 - Prefer a small stable core and independently testable feature modules with minimal dependencies.
 - Versioned JSON Schema Draft 2020-12 v1.0 is the data contract. Never silently change a required field/enum/semantics; preserve old examples.
