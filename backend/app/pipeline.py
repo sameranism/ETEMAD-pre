@@ -12,11 +12,19 @@ from typing import Any, Mapping
 
 from backend.core.sources_service import SourceService
 from backend.modules.domestic.collector import collect
-from backend.modules.domestic.feed_client import FeedError, FeedTransport, fetch_with_retry
+from backend.modules.domestic.feed_client import (
+    FeedError,
+    FeedTransport,
+    FixtureFeedTransport,
+    fetch_with_retry,
+)
 from backend.modules.domestic.repository import PostgresRawNewsRepository, RawNewsRepository
 from backend.modules.domestic.scheduler import (
+    BASE_INTERVAL_SECONDS,
+    DomesticPollPlan,
     PollClaim,
     PollResult,
+    PollStateConflict,
     PollStateStore,
     ScheduleStore,
     record_failure,
@@ -49,12 +57,16 @@ class IngestPipeline:
     # --- ingest -----------------------------------------------------------
     def poll_source(
         self, source_id: str, *, snapshot_source: Mapping[str, Any] | None = None,
+        interval_seconds: int = BASE_INTERVAL_SECONDS,
     ) -> PollResult:
         try:
             if snapshot_source is None:
                 source = self.sources.require_usable(source_id, stream="domestic")
             else:
                 source = dict(snapshot_source)
+                current = self.sources.require_usable(source_id, stream="domestic")
+                if current != source:
+                    raise ValueError("source changed after snapshot")
                 if (
                     source.get("source_id") != source_id
                     or source.get("stream") != "domestic"
@@ -68,7 +80,7 @@ class IngestPipeline:
         state = self.poll_states.get_or_create(source_id)
         feed_url = source.get("feed_url") or source.get("site_url")
         if not feed_url:
-            record_failure(state, error="source has no feed_url")
+            record_failure(state, error="source has no feed_url", interval_seconds=interval_seconds)
             self.poll_states.save(state)
             return PollResult(source_id=source_id, status="failed", error="missing feed_url", state=state.as_dict())
 
@@ -80,26 +92,32 @@ class IngestPipeline:
                 last_modified=state.last_modified,
             )
         except FeedError as exc:
-            record_failure(state, error=str(exc))
+            record_failure(state, error=str(exc), interval_seconds=interval_seconds)
             self.poll_states.save(state)
             return PollResult(source_id=source_id, status="failed", error=str(exc), state=state.as_dict())
 
         if response.not_modified:
-            record_success(state, etag=response.etag, last_modified=response.last_modified)
+            record_success(
+                state, etag=response.etag, last_modified=response.last_modified,
+                interval_seconds=interval_seconds,
+            )
             self.poll_states.save(state)
             return PollResult(source_id=source_id, status="not_modified", collected=0, state=state.as_dict())
 
         try:
             raw_records = collect(response.body, source=source)
         except Exception as exc:  # noqa: BLE001 - a broken feed is a failed poll
-            record_failure(state, error=f"parse:{type(exc).__name__}")
+            record_failure(state, error=f"parse:{type(exc).__name__}", interval_seconds=interval_seconds)
             self.poll_states.save(state)
             return PollResult(
                 source_id=source_id, status="failed", error=f"parse:{type(exc).__name__}", state=state.as_dict()
             )
 
         created, _skipped = self.repository.upsert_many(raw_records)
-        record_success(state, etag=response.etag, last_modified=response.last_modified)
+        record_success(
+                state, etag=response.etag, last_modified=response.last_modified,
+                interval_seconds=interval_seconds,
+            )
         self.poll_states.save(state)
         return PollResult(source_id=source_id, status="ok", collected=created, state=state.as_dict())
 
@@ -115,12 +133,41 @@ class IngestPipeline:
             worker_id=worker_id, limit=limit, lease_seconds=lease_seconds,
         )
 
-    def poll_claim(self, claim: PollClaim) -> PollResult:
-        """Execute one leased fixture/live poll and always release its claim."""
+    def poll_claim(
+        self, claim: PollClaim, *, interval_seconds: int = BASE_INTERVAL_SECONDS,
+    ) -> PollResult:
+        """Recheck the active claim and source before starting a new request."""
+        if not self.schedules.is_current(claim):
+            raise PollStateConflict("poll claim expired or snapshot changed")
         try:
-            return self.poll_source(claim.source_id, snapshot_source=claim.source)
+            return self.poll_source(
+                claim.source_id, snapshot_source=claim.source, interval_seconds=interval_seconds,
+            )
         finally:
             self.schedules.release(claim)
+
+    def run_scheduled_batch(
+        self, plan: DomesticPollPlan, *, worker_id: str, limit: int = 10,
+    ) -> list[PollResult]:
+        """One bounded private-fixture worker tick; claim each item just before polling."""
+        if not 1 <= limit <= 100:
+            raise ValueError("invalid poll batch limit")
+        if not plan.enabled:
+            return []
+        if not isinstance(self.transport, FixtureFeedTransport):
+            raise ValueError("automatic domestic polling is fixture-only until live authorization")
+        self.sync_domestic_snapshot()
+        results: list[PollResult] = []
+        for _ in range(limit):
+            claims = self.schedules.claim_due(worker_id=worker_id, limit=1)
+            if not claims:
+                break
+            result = self.poll_claim(claims[0], interval_seconds=plan.interval_seconds)
+            results.append(result)
+            if result.status == "blocked":
+                # Refresh a changed snapshot next tick instead of spinning.
+                break
+        return results
 
     # --- processing -------------------------------------------------------
     def process(self, raw_record: Mapping[str, Any]) -> ProcessingItem:
