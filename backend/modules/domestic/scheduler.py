@@ -9,10 +9,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Lock
-from typing import Any, Mapping
+from typing import Mapping
 
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Engine, RowMapping
 
 from backend.core.db import DatabaseRegistry
 
@@ -110,7 +110,7 @@ def _validated_state(state: PollState) -> dict[str, object]:
     return values
 
 
-def _from_row(row: Mapping[str, Any]) -> PollState:
+def _from_row(row: RowMapping) -> PollState:
     state = PollState(
         source_id=row["source_id"],
         etag=row["etag"],
