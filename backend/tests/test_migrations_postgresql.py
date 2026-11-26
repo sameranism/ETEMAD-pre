@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from backend.core.db import DatabaseRegistry
+from backend.core.sources_service import PostgresSourceService, SourceNotAllowed
 from backend.modules.domestic.repository import PostgresRawNewsRepository
 from backend.modules.processing.classifier import classify
 from backend.modules.processing.deduplicator import Clusterer
@@ -66,17 +67,18 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 10
+            assert len(central_tables) == 12
+            assert {('sources', 'source_registry'), ('sources', 'source_history')} <= central_tables
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing",
+                "audit", "control", "identity", "processing", "sources",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] != "processing" and row != ("identity", "login_throttle")
+                if row[0] not in {"processing", "sources"} and row != ("identity", "login_throttle")
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -97,6 +99,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             assert tables("foreign") == set()
             _exercise_domestic_identity(domestic)
             _exercise_processing_history(central)
+            _exercise_source_registry(central)
             assert tables("domestic") == domestic_tables
             assert tables("foreign") == set()
         finally:
@@ -262,5 +265,59 @@ def _exercise_domestic_identity(domestic):
         assert len(repo) == 3
         assert repo.get(raw["news_id"])["original_text"] == raw["original_text"]
         assert not repo.upsert(raw)[1]
+    finally:
+        registry.dispose()
+
+
+def _exercise_source_registry(central):
+    from alembic import command
+
+    registry = DatabaseRegistry()
+    store = PostgresSourceService(registry)
+    domestic = {
+        "source_id": "SRC-SYNTHETIC-DOMESTIC",
+        "site_url": "https://example.invalid",
+        "feed_url": "https://example.invalid/rss",
+        "api_base_url": None, "country": "IR", "language": "fa",
+        "stream": "domestic", "auth_ref": None, "license_scope": "summary", "enabled": True,
+    }
+    foreign = {
+        **domestic, "source_id": "SRC-SYNTHETIC-FOREIGN", "stream": "foreign", "country": "DE",
+    }
+    try:
+        assert store.register(domestic) == domestic
+        assert store.register(domestic) == domestic
+        assert len(store.history(domestic["source_id"])) == 1
+        candidate = store.register_candidate(foreign)
+        assert candidate["enabled"] is False
+        with pytest.raises(SourceNotAllowed):
+            store.require_usable(foreign["source_id"], "foreign")
+        store.set_enabled(foreign["source_id"], True)
+        with pytest.raises(SourceNotAllowed):
+            store.require_usable(foreign["source_id"], "domestic")
+        with pytest.raises(SourceNotAllowed):
+            store.register_candidate(foreign)
+        with pytest.raises(SourceNotAllowed):
+            store.register({**domestic, "license_scope": "unknown"})
+        with pytest.raises(ValueError, match="identity conflict"):
+            store.register({**domestic, "feed_url": "https://example.invalid/changed"})
+        with pytest.raises(IntegrityError):
+            store.register({
+                **domestic, "source_id": "SRC-DUPLICATE",
+                "feed_url": "https://EXAMPLE.INVALID:443/rss",
+            })
+        with pytest.raises(ValueError, match="auth_ref"):
+            store.register({**domestic, "site_url": "https://user@example.invalid"})
+        store.set_enabled(domestic["source_id"], False)
+        registry.dispose()
+        store = PostgresSourceService(registry)
+        assert not store.get(domestic["source_id"])["enabled"]
+        assert store.list(enabled_only=True) == [foreign]
+        revisions = store.history(domestic["source_id"])
+        assert [x["revision_no"] for x in revisions] == [1, 2]
+        assert [x["source"]["enabled"] for x in revisions] == [True, False]
+        assert len(store.document()["sources"]) == 2
+        with pytest.raises(DBAPIError, match="source registry is not empty"):
+            command.downgrade(central, "004_login_throttle")
     finally:
         registry.dispose()

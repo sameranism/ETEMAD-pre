@@ -32,7 +32,7 @@ from backend.core.outbox import Outbox
 from backend.core.output_switches import OutputSwitches, default_off_switches
 from backend.core.permissions import InMemoryGrantStore, PostgresGrantStore
 from backend.core.settings_service import InMemoryRevisionStore, SettingsService
-from backend.core.sources_service import SourceService
+from backend.core.sources_service import PostgresSourceService, SourceService
 from backend.modules.domestic.feed_client import (
     FeedTransport,
     FixtureFeedTransport,
@@ -131,7 +131,17 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         audit_sink = InMemoryAuditSink()
     revision_store = InMemoryRevisionStore()
     settings = SettingsService(revision_store, grant_store, credential_ref_check=lambda ref: bool(ref))
-    sources = SourceService()
+    source_storage = environ.get("ETEMAD_SOURCE_STORAGE", "fixture")
+    if source_storage not in {"fixture", "postgres"}:
+        raise ValueError("invalid ETEMAD_SOURCE_STORAGE")
+    sources: SourceService
+    if source_storage == "postgres":
+        if (storage != "postgres" or environ.get("ETEMAD_ENV") != "staging"
+                or environ.get("ETEMAD_FEED_MODE", "fixture") != "fixture"):
+            raise ValueError("persistent source registry requires private staging and fixture feeds")
+        sources = PostgresSourceService(registry)
+    else:
+        sources = SourceService()
     jobs = JobQueue()
     bus = InMemoryEventBus()
     outbox = Outbox()
