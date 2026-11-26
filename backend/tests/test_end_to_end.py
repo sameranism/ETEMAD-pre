@@ -18,7 +18,10 @@ from backend.core.auth import Principal, issue_session
 from backend.core.permissions import Grant
 from backend.modules.domestic.feed_client import FeedResponse, FixtureFeedTransport
 from backend.modules.domestic.scheduler import (
-    PollState, PollStateConflict, PostgresPollStateStore, record_failure,
+    PollState,
+    PollStateConflict,
+    PostgresPollStateStore,
+    record_failure,
 )
 
 ADMIN_URL = os.environ.get("ETEMAD_TEST_PG_ADMIN_URL")
