@@ -3,6 +3,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import App, { parseNewsFeed } from "../src/app/App";
 import NewsDesk from "../src/features/newsroom/NewsDesk";
+import Login from "../src/features/auth/Login";
+import { parseAuthResult } from "../src/lib/auth";
 
 const item = {
   news_id: "NEWS-DB-1", title: "خبر واقعی از API آزمایشی",
@@ -43,7 +45,8 @@ describe("authenticated newsroom projection", () => {
 
   it("requires a session before showing the feed", () => {
     const html = renderToStaticMarkup(createElement(App));
-    expect(html).toContain("session-token");
+    expect(html).toContain("در حال بررسی وضعیت ورود");
+    expect(html).not.toContain("session-token");
     expect(html).not.toContain(item.title);
     expect(html).not.toContain("داده‌های ساختگی");
   });
@@ -53,5 +56,28 @@ describe("authenticated newsroom projection", () => {
     const html = renderToStaticMarkup(createElement(NewsDesk, { items }));
     expect(html).not.toContain("javascript:");
     expect(html).toContain("نشانی منبع نامعتبر");
+  });
+});
+
+
+describe("staff session", () => {
+  it("renders a personal credential form without prefilled credentials", () => {
+    const html = renderToStaticMarkup(createElement(Login, { onSession: () => {} }));
+    expect(html).toContain("login-username");
+    expect(html).toContain("login-password");
+    expect(html).not.toContain("session-token");
+  });
+
+  it("does not accept a session before required reset", () => {
+    expect(parseAuthResult({ schema_version: "1.0", must_reset: true })).toEqual({ mustReset: true });
+    expect(() => parseAuthResult({
+      schema_version: "1.0", must_reset: true, access_token: "fixture",
+    })).toThrow();
+    expect(() => parseAuthResult({
+      schema_version: "1.0", must_reset: false, token_type: "bearer", access_token: "fixture", expires_in: 9999,
+    })).toThrow();
+    expect(parseAuthResult({
+      schema_version: "1.0", must_reset: false, token_type: "bearer", access_token: "fixture", expires_in: 900,
+    })).toEqual({ mustReset: false, token: "fixture", expiresIn: 900 });
   });
 });
