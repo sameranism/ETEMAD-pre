@@ -190,6 +190,24 @@ class PostgresAccountStore:
             raise ValueError("account storage requires PostgreSQL")
         return engine
 
+    def consume_attempt(self) -> bool:
+        """Shared fixed-window throttle; all attempts count, no account oracle."""
+        with self._engine().begin() as conn:
+            return conn.execute(text("""
+                INSERT INTO identity.login_throttle (bucket, window_started, attempts)
+                VALUES (1, now(), 1)
+                ON CONFLICT (bucket) DO UPDATE SET
+                    window_started = CASE WHEN identity.login_throttle.window_started
+                        <= now() - interval '1 minute' THEN now()
+                        ELSE identity.login_throttle.window_started END,
+                    attempts = CASE WHEN identity.login_throttle.window_started
+                        <= now() - interval '1 minute' THEN 1
+                        ELSE identity.login_throttle.attempts + 1 END
+                WHERE identity.login_throttle.window_started <= now() - interval '1 minute'
+                    OR identity.login_throttle.attempts < 30
+                RETURNING bucket
+            """)).scalar_one_or_none() is not None
+
     def provision(self, username: str, role: str) -> tuple[str, str]:
         if not username or username != username.strip() or len(username) > 64 or role not in ROLES:
             raise ValueError("invalid account")
