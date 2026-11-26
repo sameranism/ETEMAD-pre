@@ -9,7 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Lock
-from typing import Mapping
+from typing import Any, Mapping
+
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
+from backend.core.db import DatabaseRegistry
 
 BASE_INTERVAL_SECONDS = 300
 MAX_INTERVAL_SECONDS = 3600
@@ -35,6 +40,7 @@ class PollState:
     last_error: str | None = None
     consecutive_failures: int = 0
     next_poll_at: str | None = None
+    _persisted: dict[str, object] | None = field(default=None, repr=False, compare=False)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -73,6 +79,125 @@ class PollStateStore:
     def all(self) -> list[dict[str, object]]:
         with self._lock:
             return [state.as_dict() for state in self._states.values()]
+
+
+class PollStateConflict(RuntimeError):
+    """The persisted state changed after this poll loaded its snapshot."""
+
+
+def _utc_timestamp(value: str | None) -> str | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("poll timestamps require a timezone")
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _validated_state(state: PollState) -> dict[str, object]:
+    values = state.as_dict()
+    if not isinstance(state.source_id, str) or not 1 <= len(state.source_id) <= 64:
+        raise ValueError("invalid source identifier")
+    if type(state.consecutive_failures) is not int or state.consecutive_failures < 0:
+        raise ValueError("invalid consecutive failure count")
+    for value, maximum in (
+        (state.etag, 256), (state.last_modified, 128), (state.last_error, 200),
+    ):
+        if value is not None and (not isinstance(value, str) or len(value) > maximum):
+            raise ValueError("invalid poll state field")
+    values["last_success_at"] = _utc_timestamp(state.last_success_at)
+    values["next_poll_at"] = _utc_timestamp(state.next_poll_at)
+    return values
+
+
+def _from_row(row: Mapping[str, Any]) -> PollState:
+    state = PollState(
+        source_id=row["source_id"],
+        etag=row["etag"],
+        last_modified=row["last_modified"],
+        last_success_at=row["last_success_at"].isoformat() if row["last_success_at"] else None,
+        last_error=row["last_error"],
+        consecutive_failures=row["consecutive_failures"],
+        next_poll_at=row["next_poll_at"].isoformat() if row["next_poll_at"] else None,
+    )
+    state.last_success_at = _utc_timestamp(state.last_success_at)
+    state.next_poll_at = _utc_timestamp(state.next_poll_at)
+    state._persisted = state.as_dict()
+    return state
+
+
+class PostgresPollStateStore(PollStateStore):
+    """Durable P05 state; stale workers cannot overwrite a newer poll result.
+
+    Only the existing domestic table is used. Network requests do not hold
+    database transactions open. Concurrent writers use compare-and-swap.
+    """
+
+    def __init__(self, registry: DatabaseRegistry) -> None:
+        self._registry = registry
+
+    def _engine(self) -> Engine:
+        engine = self._registry.engine("domestic")
+        if engine.dialect.name != "postgresql":
+            raise ValueError("poll state requires PostgreSQL")
+        return engine
+
+    def get_or_create(self, source_id: str) -> PollState:
+        _validated_state(PollState(source_id=source_id))
+        with self._engine().begin() as conn:
+            conn.execute(text("""
+                INSERT INTO domestic.poll_state (source_id)
+                VALUES (:source_id) ON CONFLICT (source_id) DO NOTHING
+            """), {"source_id": source_id})
+            row = conn.execute(text(_SELECT_STATE + " WHERE source_id = :source_id"),
+                               {"source_id": source_id}).mappings().one()
+            return _from_row(row)
+
+    def save(self, state: PollState) -> PollState:
+        params = _validated_state(state)
+        baseline = state._persisted
+        if baseline is None or baseline["source_id"] != state.source_id:
+            raise ValueError("poll state must be loaded before saving")
+        params.update({f"old_{key}": value for key, value in baseline.items()})
+        with self._engine().begin() as conn:
+            row = conn.execute(text("""
+                UPDATE domestic.poll_state SET
+                    etag = :etag,
+                    last_modified = :last_modified,
+                    last_success_at = CAST(:last_success_at AS timestamptz),
+                    last_error = :last_error,
+                    consecutive_failures = :consecutive_failures,
+                    next_poll_at = CAST(:next_poll_at AS timestamptz)
+                WHERE source_id = :source_id
+                    AND etag IS NOT DISTINCT FROM :old_etag
+                    AND last_modified IS NOT DISTINCT FROM :old_last_modified
+                    AND last_success_at IS NOT DISTINCT FROM CAST(:old_last_success_at AS timestamptz)
+                    AND last_error IS NOT DISTINCT FROM :old_last_error
+                    AND consecutive_failures = :old_consecutive_failures
+                    AND next_poll_at IS NOT DISTINCT FROM CAST(:old_next_poll_at AS timestamptz)
+                RETURNING source_id, etag, last_modified, last_success_at,
+                    last_error, consecutive_failures, next_poll_at
+            """), params).mappings().one_or_none()
+            if row is None:
+                raise PollStateConflict("stale poll state; reload before retry")
+            persisted = _from_row(row)
+        state.last_success_at = persisted.last_success_at
+        state.next_poll_at = persisted.next_poll_at
+        state._persisted = persisted._persisted
+        return state
+
+    def all(self) -> list[dict[str, object]]:
+        with self._engine().connect() as conn:
+            return [_from_row(row).as_dict() for row in conn.execute(
+                text(_SELECT_STATE + " ORDER BY source_id")
+            ).mappings()]
+
+
+_SELECT_STATE = """
+SELECT source_id, etag, last_modified, last_success_at, last_error,
+       consecutive_failures, next_poll_at
+FROM domestic.poll_state
+"""
 
 
 def should_poll(state: PollState, now: datetime | None = None) -> bool:
