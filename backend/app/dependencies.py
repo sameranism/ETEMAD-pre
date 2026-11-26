@@ -7,6 +7,8 @@ unrelated production prerequisites have passed.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import os
 import secrets
@@ -19,7 +21,8 @@ from sqlalchemy.engine import make_url
 
 from backend.app.pipeline import IngestPipeline
 from backend.core.archive import InMemoryArchiveStore
-from backend.core.audit import Auditor, InMemoryAuditSink
+from backend.core.audit import Auditor, InMemoryAuditSink, PostgresAuditSink
+from backend.core.auth import PostgresAccountStore
 from backend.core.db import DatabaseRegistry
 from backend.core.events import InMemoryEventBus
 from backend.core.jobs import JobQueue
@@ -27,7 +30,7 @@ from backend.core.object_store import LocalObjectStore
 from backend.core.orchestrator import Orchestrator
 from backend.core.outbox import Outbox
 from backend.core.output_switches import OutputSwitches, default_off_switches
-from backend.core.permissions import InMemoryGrantStore
+from backend.core.permissions import InMemoryGrantStore, PostgresGrantStore
 from backend.core.settings_service import InMemoryRevisionStore, SettingsService
 from backend.core.sources_service import SourceService
 from backend.modules.domestic.feed_client import (
@@ -47,7 +50,7 @@ class Services:
     registry: DatabaseRegistry
     session_key: bytes
     grants: InMemoryGrantStore
-    audit_sink: InMemoryAuditSink
+    audit_sink: InMemoryAuditSink | PostgresAuditSink
     auditor: Auditor
     settings: SettingsService
     sources: SourceService
@@ -59,6 +62,7 @@ class Services:
     switches: Callable[[], OutputSwitches]
     pipeline: IngestPipeline
     transport: FeedTransport
+    accounts: PostgresAccountStore | None = None
     orchestrator: Orchestrator = field(init=False)
 
     def __post_init__(self) -> None:
@@ -105,9 +109,27 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         session_key = secrets.token_bytes(32)
         _LOG.warning("ETEMAD_SESSION_KEY is not set; using an ephemeral session key")
 
-    grant_store = InMemoryGrantStore()
+    identity = environ.get("ETEMAD_IDENTITY_STORAGE", "fixture")
+    if identity not in {"fixture", "postgres"}:
+        raise ValueError("invalid ETEMAD_IDENTITY_STORAGE")
+    accounts: PostgresAccountStore | None = None
+    grant_store: InMemoryGrantStore
+    audit_sink: InMemoryAuditSink | PostgresAuditSink
+    if identity == "postgres":
+        if (storage != "postgres" or environ.get("ETEMAD_ENV") != "staging"
+                or environ.get("ETEMAD_FEED_MODE", "fixture") != "fixture"
+                or len(environ.get("ETEMAD_SESSION_KEY", "").strip().encode("utf-8")) < 32):
+            raise ValueError("persistent staff identity requires private staging, fixture feeds and a strong key")
+        # A fixture bearer must never be accepted in persistent identity mode.
+        marker_key = hmac.new(session_key, b"etemad-account-marker-v1", hashlib.sha256).digest()
+        session_key = hmac.new(session_key, b"etemad-staff-session-v1", hashlib.sha256).digest()
+        accounts = PostgresAccountStore(registry, marker_key)
+        grant_store = PostgresGrantStore(registry)
+        audit_sink = PostgresAuditSink(registry)
+    else:
+        grant_store = InMemoryGrantStore()
+        audit_sink = InMemoryAuditSink()
     revision_store = InMemoryRevisionStore()
-    audit_sink = InMemoryAuditSink()
     settings = SettingsService(revision_store, grant_store, credential_ref_check=lambda ref: bool(ref))
     sources = SourceService()
     jobs = JobQueue()
@@ -157,6 +179,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         switches=switches,
         pipeline=pipeline,
         transport=transport,
+        accounts=accounts,
     )
 
 

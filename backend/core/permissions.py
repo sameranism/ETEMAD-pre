@@ -9,6 +9,10 @@ from threading import Lock
 from uuid import uuid4
 
 from fastapi import HTTPException
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
+from backend.core.db import DatabaseRegistry
 
 Role = str
 GrantLookup = Callable[[str, Role, str, str, str], bool]
@@ -62,6 +66,63 @@ class InMemoryGrantStore:
         action: str,
     ) -> bool:
         return self.lookup(principal_id, role, resource_type, resource_id, action)
+
+
+class PostgresGrantStore(InMemoryGrantStore):
+    """Authoritative grants in P28's central schema, with explicit revocation."""
+
+    def __init__(self, registry: DatabaseRegistry) -> None:
+        self._registry = registry
+
+    def _engine(self) -> Engine:
+        engine = self._registry.engine("central")
+        if engine.dialect.name != "postgresql":
+            raise ValueError("grant storage requires PostgreSQL")
+        return engine
+
+    @staticmethod
+    def _params(grant: Grant) -> dict[str, str]:
+        return {
+            "principal_id": grant.principal_id, "role": grant.role,
+            "resource_type": grant.resource_type, "resource_id": grant.resource_id,
+            "action": grant.action,
+        }
+
+    def grant(self, grant: Grant) -> None:
+        if grant.role not in _ROLES or not all(self._params(grant).values()):
+            raise ValueError("invalid grant")
+        with self._engine().begin() as conn:
+            conn.execute(text("""
+                INSERT INTO identity.grants
+                    (grant_id, principal_id, role, resource_type, resource_id, action, granted_at)
+                VALUES (:id, :principal_id, :role, :resource_type, :resource_id, :action, now())
+                ON CONFLICT (principal_id, role, resource_type, resource_id, action)
+                DO UPDATE SET revoked_at = NULL, granted_at = now()
+            """), {**self._params(grant), "id": str(uuid4())})
+
+    def revoke(self, grant: Grant) -> None:
+        with self._engine().begin() as conn:
+            conn.execute(text("""
+                UPDATE identity.grants SET revoked_at = now()
+                WHERE principal_id = :principal_id AND role = :role
+                  AND resource_type = :resource_type AND resource_id = :resource_id
+                  AND action = :action AND revoked_at IS NULL
+            """), self._params(grant))
+
+    def lookup(
+        self, principal_id: str, role: Role, resource_type: str, resource_id: str, action: str,
+    ) -> bool:
+        with self._engine().connect() as conn:
+            return bool(conn.execute(text("""
+                SELECT EXISTS (
+                    SELECT 1 FROM identity.grants g
+                    JOIN identity.users u ON u.user_id = g.principal_id AND u.role_id = g.role
+                    WHERE g.principal_id = :principal_id AND g.role = :role
+                      AND g.resource_type = :resource_type AND g.resource_id = :resource_id
+                      AND g.action = :action AND g.revoked_at IS NULL
+                      AND u.is_active AND NOT u.must_reset
+                )
+            """), self._params(Grant(principal_id, role, resource_type, resource_id, action))).scalar_one())
 
 
 def decide_access(

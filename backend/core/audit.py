@@ -7,12 +7,17 @@ process.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Callable, Mapping, Protocol
 from uuid import uuid4
+
+from sqlalchemy import text
+
+from backend.core.db import DatabaseRegistry
 
 _SENSITIVE_KEY = re.compile(
     r"(password|passwd|secret|token|credential|authorization|api[_-]?key|cookie)",
@@ -87,6 +92,31 @@ class InMemoryAuditSink:
     def entries(self) -> tuple[AuditEntry, ...]:
         with self._lock:
             return tuple(self._entries)
+
+
+class PostgresAuditSink:
+    """Append audit records to the existing central audit schema."""
+
+    def __init__(self, registry: DatabaseRegistry) -> None:
+        self._registry = registry
+
+    def write(self, entry: AuditEntry) -> None:
+        engine = self._registry.engine("central")
+        if engine.dialect.name != "postgresql":
+            raise ValueError("audit storage requires PostgreSQL")
+        params = entry.as_dict()
+        params["details"] = json.dumps(sanitize(entry.details), allow_nan=False)
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO audit.audit_entries (
+                    audit_id, occurred_at, actor_id, actor_role, action,
+                    resource_type, resource_id, decision, correlation_id, details_json
+                ) VALUES (
+                    :audit_id, CAST(:occurred_at AS timestamptz), :actor_id,
+                    :actor_role, :action, :resource_type, :resource_id,
+                    :decision, :correlation_id, CAST(:details AS json)
+                )
+            """), params)
 
 
 class Auditor:
