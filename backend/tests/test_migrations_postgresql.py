@@ -14,6 +14,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError
 
 from backend.core.db import DatabaseRegistry
+from backend.modules.domestic.repository import PostgresRawNewsRepository
 from backend.modules.processing.classifier import classify
 from backend.modules.processing.deduplicator import Clusterer
 from backend.modules.processing.normalizer import normalize
@@ -81,7 +82,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             domestic = Config("alembic_domestic.ini")
             command.upgrade(domestic, "head")
             domestic_tables = tables("domestic")
-            assert len(domestic_tables) == 2
+            assert len(domestic_tables) == 3
+            assert ("domestic", "raw_content_identity") in domestic_tables
             assert not domestic_tables & central_tables
             command.downgrade(domestic, "base")
             assert tables("domestic") == set()
@@ -89,6 +91,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             assert tables("domestic") == domestic_tables
             assert tables("central") == central_tables
             assert tables("foreign") == set()
+            _exercise_domestic_identity(domestic)
             _exercise_processing_history(central)
             assert tables("domestic") == domestic_tables
             assert tables("foreign") == set()
@@ -197,5 +200,63 @@ def _exercise_processing_history(central):
         with pytest.raises(DBAPIError, match="processing history is not empty"):
             command.downgrade(central, "002_processing")
         assert repo.get("NEWS-TEST-1").news == revised["news"]
+    finally:
+        registry.dispose()
+
+
+def _exercise_domestic_identity(domestic):
+    from alembic import command
+
+    registry = DatabaseRegistry()
+    repo = PostgresRawNewsRepository(registry)
+    raw = {
+        "schema_version": "1.0", "news_id": "NEWS-DOM-1",
+        "stream": "domestic", "source_id": "SRC-DOM-1",
+        "original_url": "https://example.invalid/one",
+        "original_title": "Fixture title", "original_text": "Synthetic content",
+        "language": "en", "subject_countries": [],
+        "collected_at": "2026-11-23T07:00:00Z",
+        "content_scope": "summary", "reuse_permission": "unverified",
+    }
+    try:
+        first, created = repo.upsert(raw)
+        assert created
+        assert first["original_text"] == raw["original_text"]
+        with ThreadPoolExecutor(max_workers=4) as workers:
+            results = list(workers.map(lambda _: repo.upsert(raw), range(8)))
+        assert all(not created for _, created in results)
+        assert len(repo) == 1
+
+        alias = {**raw, "news_id": "NEWS-DOM-2",
+                 "original_url": "https://example.invalid/two"}
+        assert repo.upsert(alias)[1]
+        different_source = {**raw, "news_id": "NEWS-DOM-3", "source_id": "SRC-DOM-2"}
+        assert repo.upsert(different_source)[1]
+        assert repo.list(stream="foreign") == []
+        assert len(repo.list(stream="domestic")) == 3
+        with pytest.raises(ValueError, match="only domestic"):
+            repo.upsert({**raw, "stream": "foreign"})
+        with pytest.raises(ValueError, match="immutable identity"):
+            repo.upsert({**raw, "original_text": "Revised source text"})
+        with pytest.raises(ValueError, match="identity"):
+            repo.upsert({**raw, "news_id": "NEWS-DOM-COLLISION"})
+        new = {**raw, "news_id": "NEWS-DOM-NEW",
+               "original_url": "https://example.invalid/new"}
+        with pytest.raises(ValueError):
+            repo.upsert_many([new, {**raw, "original_text": "Different"}])
+        assert repo.get(new["news_id"]) is None
+        assert len(repo) == 3
+        engine = registry.engine("domestic")
+        with engine.connect() as conn:
+            assert conn.execute(text(
+                "SELECT count(*) FROM domestic.raw_content_identity"
+            )).scalar_one() == 2
+        # Derived identity can be reconstructed without losing raw records.
+        registry.dispose()
+        command.downgrade(domestic, "001_ingest")
+        command.upgrade(domestic, "head")
+        assert len(repo) == 3
+        assert repo.get(raw["news_id"])["original_text"] == raw["original_text"]
+        assert not repo.upsert(raw)[1]
     finally:
         registry.dispose()
