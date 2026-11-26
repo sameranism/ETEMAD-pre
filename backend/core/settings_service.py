@@ -6,15 +6,20 @@ record. ``InMemoryRevisionStore`` is for local fixtures only; it is not durable.
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Callable, Mapping, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import HTTPException
+from sqlalchemy import text
+from sqlalchemy.engine import Connection, Engine
 
 from backend.core.contracts import ContractError, validate_payload
+from backend.core.db import DatabaseRegistry
 from backend.core.permissions import GrantLookup, decide_access, require_access
 
 _SUPPORTED = frozenset(
@@ -115,6 +120,114 @@ class InMemoryRevisionStore:
             return tuple(self._audit)
 
 
+DOMESTIC_INGEST_CONFIG_ID = "SCH-DOMESTIC-INGEST"
+DOMESTIC_INGEST_SCOPE = "domestic"
+
+
+def _validate_ingest_schedule(value: Mapping[str, Any]) -> None:
+    validate_payload("schedule_config", value)
+    if (value["config_id"] != DOMESTIC_INGEST_CONFIG_ID
+            or value["stream"] != "domestic" or value["desk"] != "all"
+            or value["mode"] != "interval" or value["fixed_times_local"]
+            or type(value["interval_minutes"]) is not int
+            or not 1 <= value["interval_minutes"] <= 1440):
+        raise ValueError("invalid domestic ingestion interval configuration")
+    try:
+        ZoneInfo(value["timezone"])
+    except (ValueError, ZoneInfoNotFoundError) as exc:
+        raise ValueError("invalid schedule timezone") from exc
+
+
+class PostgresIngestScheduleStore(InMemoryRevisionStore):
+    """Durable P02 ingestion schedule only; other settings retain fixture behavior.
+
+    Each append-only revision records actor and time in the same row, providing
+    its durable audit record without a second, non-atomic write. No output
+    switches, credentials or other configuration are persisted by this slice.
+    """
+
+    def __init__(self, registry: DatabaseRegistry) -> None:
+        super().__init__()
+        self._registry = registry
+
+    def _engine(self) -> Engine:
+        engine = self._registry.engine("central")
+        if engine.dialect.name != "postgresql":
+            raise ValueError("schedule persistence requires PostgreSQL")
+        return engine
+
+    @staticmethod
+    def _is_ingest(contract_name: str, config_id: str, scope: str) -> bool:
+        return (contract_name, config_id, scope) == (
+            "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
+        )
+
+    @staticmethod
+    def _latest(conn: Connection) -> ConfigRevision | None:
+        row = conn.execute(text("""
+            SELECT version_no, value_json, changed_by
+            FROM control.config_revisions
+            WHERE config_id = :id AND scope = :scope AND contract_name = 'schedule_config'
+            ORDER BY version_no DESC LIMIT 1
+        """), {"id": DOMESTIC_INGEST_CONFIG_ID, "scope": DOMESTIC_INGEST_SCOPE}).mappings().one_or_none()
+        if row is None:
+            return None
+        return ConfigRevision(
+            "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
+            row["version_no"], deepcopy(row["value_json"]), row["changed_by"],
+        )
+
+    def get(self, contract_name: str, config_id: str, scope: str) -> ConfigRevision | None:
+        if not self._is_ingest(contract_name, config_id, scope):
+            return super().get(contract_name, config_id, scope)
+        with self._engine().connect() as conn:
+            return self._latest(conn)
+
+    def compare_and_append(
+        self, *, contract_name: str, config_id: str, scope: str,
+        expected_revision: int, value: Mapping[str, Any], actor_id: str,
+    ) -> ConfigRevision:
+        if not self._is_ingest(contract_name, config_id, scope):
+            return super().compare_and_append(
+                contract_name=contract_name, config_id=config_id, scope=scope,
+                expected_revision=expected_revision, value=value, actor_id=actor_id,
+            )
+        _validate_ingest_schedule(value)
+        with self._engine().begin() as conn:
+            conn.execute(text("LOCK TABLE control.config_revisions IN SHARE ROW EXCLUSIVE MODE"))
+            latest = self._latest(conn)
+            current = latest.revision if latest is not None else 0
+            if current != expected_revision:
+                raise RevisionConflict
+            revision = current + 1
+            conn.execute(text("""
+                INSERT INTO control.config_revisions
+                    (config_id, version_no, scope, contract_name, value_json, changed_by, effective_at)
+                VALUES (:id, :rev, :scope, 'schedule_config', CAST(:value AS json), :actor, now())
+            """), {
+                "id": config_id, "rev": revision, "scope": scope,
+                "value": json.dumps(dict(value), ensure_ascii=False, allow_nan=False),
+                "actor": actor_id,
+            })
+        return ConfigRevision(contract_name, config_id, scope, revision, deepcopy(dict(value)), actor_id)
+
+    def audit_entries(self) -> tuple[ConfigAudit, ...]:
+        with self._engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT version_no, changed_by, effective_at
+                FROM control.config_revisions
+                WHERE config_id = :id AND scope = :scope AND contract_name = 'schedule_config'
+                ORDER BY version_no
+            """), {"id": DOMESTIC_INGEST_CONFIG_ID, "scope": DOMESTIC_INGEST_SCOPE}).mappings().all()
+        return super().audit_entries() + tuple(
+            ConfigAudit(
+                "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
+                row["version_no"], row["changed_by"], row["effective_at"].isoformat(),
+            )
+            for row in rows
+        )
+
+
 CredentialRefCheck = Callable[[str], bool]
 
 
@@ -190,6 +303,13 @@ class SettingsService:
                 raise HTTPException(status_code=400, detail="Invalid credential reference")
         elif contract_name == "news_framework" and value["framework_id"] != config_id:
             raise HTTPException(status_code=400, detail="Config ID mismatch")
+        if config_id == DOMESTIC_INGEST_CONFIG_ID:
+            if contract_name != "schedule_config" or scope != DOMESTIC_INGEST_SCOPE:
+                raise HTTPException(status_code=400, detail="Invalid domestic schedule scope")
+            try:
+                _validate_ingest_schedule(value)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid domestic interval schedule") from exc
         try:
             return self._store.compare_and_append(
                 contract_name=contract_name,
