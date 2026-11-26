@@ -5,6 +5,7 @@ import App, { parseNewsFeed } from "../src/app/App";
 import Login from "../src/features/auth/Login";
 import NewsDesk from "../src/features/newsroom/NewsDesk";
 import SourcesManager, { parseSources } from "../src/features/sources/SourcesManager";
+import Settings, { parseDomesticSchedule, scheduleError } from "../src/features/settings/Settings";
 import { parseAuthResult } from "../src/lib/auth";
 
 const item = {
@@ -126,5 +127,29 @@ describe("source registry", () => {
     }));
     expect(html).toContain("دسترسی به دفتر منابع مجاز نیست");
     expect(html).not.toContain("SRC-IR-1");
+  });
+});
+
+describe("domestic ingestion settings", () => {
+  const config = {
+    schema_version: "1.0", contract_name: "schedule_config", config_id: "SCH-DOMESTIC-INGEST",
+    scope: "domestic", revision: 2,
+    value: { schema_version: "1.0", config_id: "SCH-DOMESTIC-INGEST", stream: "domestic",
+      desk: "all", timezone: "Asia/Tehran", mode: "interval", fixed_times_local: [],
+      interval_minutes: 7, enabled: false, updated_at: "2026-11-26T08:00:00Z" },
+  };
+  it("accepts only scoped and bounded ingestion settings", () => {
+    expect(parseDomesticSchedule(config)).toEqual({ revision: 2, minutes: 7, enabled: false });
+    expect(() => parseDomesticSchedule({ ...config, scope: "foreign" })).toThrow();
+    expect(() => parseDomesticSchedule({ ...config, value: { ...config.value, interval_minutes: 0 } })).toThrow();
+    expect(() => parseDomesticSchedule({ ...config, value: { ...config.value, stream: "foreign" } })).toThrow();
+  });
+  it("handles denied access and revision conflict independently", () => {
+    expect(scheduleError(403)).toBe("forbidden");
+    expect(scheduleError(409)).toBe("conflict");
+    const html = renderToStaticMarkup(createElement(Settings, { token: "fixture-not-a-real-token" }));
+    expect(html).toContain("در حال دریافت تنظیمات");
+    expect(html).not.toContain("fixture-not-a-real-token");
+    expect(html).not.toContain("ذخیره تنظیمات");
   });
 });
