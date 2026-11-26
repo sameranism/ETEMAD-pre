@@ -7,12 +7,18 @@ be enabled by a side door.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, List, Mapping
+from urllib.parse import urlsplit, urlunsplit
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection, Engine
 
 from backend.core.contracts import validate_payload
+from backend.core.db import DatabaseRegistry
 
 BLOCKED_SCOPE = "unknown"
 
@@ -97,3 +103,145 @@ class SourceService:
                 "sources": sources,
             },
         )
+
+
+def _normalized_url(value: str) -> str:
+    """Canonical identity for a configured endpoint; never fetch or resolve it."""
+    if any(ch.isspace() or ord(ch) < 32 for ch in value):
+        raise ValueError("invalid source URL")
+    parts = urlsplit(value)
+    if (parts.scheme not in {"http", "https"} or not parts.hostname
+            or parts.username is not None or parts.password is not None or parts.fragment):
+        raise ValueError("invalid source URL; use auth_ref for credentials")
+    host = parts.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    port = parts.port
+    if port is not None and port != (443 if parts.scheme == "https" else 80):
+        host = f"{host}:{port}"
+    normalized = urlunsplit((parts.scheme, host, parts.path or "/", parts.query, ""))
+    if len(normalized.encode("utf-8")) > 2048:
+        raise ValueError("source URL exceeds storage limit")
+    return normalized
+
+
+class PostgresSourceService(SourceService):
+    """P03-owned central registry. No external fetch or candidate auto-approval.
+
+    Callers must authorize writes before calling register/set_enabled.
+    History is internal persistence, not a change to the frozen wire contract.
+    """
+
+    def __init__(self, registry: DatabaseRegistry) -> None:
+        super().__init__()
+        self._registry = registry
+
+    def _engine(self) -> Engine:
+        engine = self._registry.engine("central")
+        if engine.dialect.name != "postgresql":
+            raise ValueError("source registry requires PostgreSQL")
+        return engine
+
+    def _prepare(self, source: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
+        candidate = dict(source)
+        self._validate_with([candidate])
+        if candidate["enabled"] and candidate["license_scope"] == BLOCKED_SCOPE:
+            raise SourceNotAllowed("source has no reuse right")
+        for field_name in ("site_url", "feed_url", "api_base_url"):
+            value = candidate.get(field_name)
+            if value is not None:
+                _normalized_url(value)
+        endpoint = candidate.get("feed_url") or candidate.get("api_base_url") or candidate["site_url"]
+        return candidate, _normalized_url(endpoint)
+
+    @staticmethod
+    def _lock_writes(conn: Connection) -> None:
+        # Source registry is small; serialize changes to preserve revisions.
+        conn.execute(text("LOCK TABLE sources.source_registry IN SHARE ROW EXCLUSIVE MODE"))
+
+    def _store(
+        self, conn: Connection, candidate: dict[str, Any], endpoint: str,
+        *, candidate_only: bool = False,
+    ) -> dict[str, Any]:
+        row = conn.execute(text("""
+            SELECT stream, url_normalized, revision_no, snapshot
+            FROM sources.source_registry WHERE source_id = :id
+        """), {"id": candidate["source_id"]}).mappings().one_or_none()
+        if row is not None:
+            if row["snapshot"] == candidate:
+                return dict(candidate)
+            if candidate_only:
+                raise SourceNotAllowed("candidate cannot overwrite a registered source")
+            if row["stream"] != candidate["stream"] or row["url_normalized"] != endpoint:
+                raise ValueError("source identity conflict; use a new source id")
+        revision = 1 if row is None else int(row["revision_no"]) + 1
+        params = {
+            "id": candidate["source_id"], "stream": candidate["stream"], "url": endpoint,
+            "rev": revision, "snapshot": json.dumps(candidate, ensure_ascii=False),
+        }
+        conn.execute(text("""
+            INSERT INTO sources.source_registry
+                (source_id, stream, url_normalized, revision_no, snapshot)
+            VALUES (:id, :stream, :url, :rev, CAST(:snapshot AS jsonb))
+            ON CONFLICT (source_id) DO UPDATE SET revision_no = EXCLUDED.revision_no,
+                snapshot = EXCLUDED.snapshot, updated_at = now()
+        """), params)
+        conn.execute(text("""
+            INSERT INTO sources.source_history (source_id, revision_no, snapshot)
+            VALUES (:id, :rev, CAST(:snapshot AS jsonb))
+        """), params)
+        return dict(candidate)
+
+    def register(self, source: Mapping[str, Any]) -> dict[str, Any]:
+        candidate, endpoint = self._prepare(source)
+        with self._engine().begin() as conn:
+            self._lock_writes(conn)
+            return self._store(conn, candidate, endpoint)
+
+    def register_candidate(self, source: Mapping[str, Any]) -> dict[str, Any]:
+        """Discovery candidates start disabled and never replace approved records."""
+        candidate, endpoint = self._prepare({**source, "enabled": False})
+        with self._engine().begin() as conn:
+            self._lock_writes(conn)
+            return self._store(conn, candidate, endpoint, candidate_only=True)
+
+    def set_enabled(self, source_id: str, enabled: bool) -> dict[str, Any]:
+        with self._engine().begin() as conn:
+            self._lock_writes(conn)
+            snapshot = conn.execute(text("""
+                SELECT snapshot FROM sources.source_registry WHERE source_id = :id
+            """), {"id": source_id}).scalar_one_or_none()
+            if snapshot is None:
+                raise SourceNotFound(source_id)
+            candidate, endpoint = self._prepare({**snapshot, "enabled": enabled})
+            return self._store(conn, candidate, endpoint)
+
+    def get(self, source_id: str) -> dict[str, Any]:
+        with self._engine().connect() as conn:
+            snapshot = conn.execute(text("""
+                SELECT snapshot FROM sources.source_registry WHERE source_id = :id
+            """), {"id": source_id}).scalar_one_or_none()
+        if snapshot is None:
+            raise SourceNotFound(source_id)
+        candidate, _ = self._prepare(snapshot)
+        return candidate
+
+    def list(self, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        with self._engine().connect() as conn:
+            snapshots = conn.execute(text("""
+                SELECT snapshot FROM sources.source_registry ORDER BY source_id
+            """)).scalars().all()
+        candidates = [self._prepare(snapshot)[0] for snapshot in snapshots]
+        return [s for s in candidates if s["enabled"]] if enabled_only else candidates
+
+    def history(self, source_id: str) -> list[dict[str, Any]]:
+        """Return ordered internal revisions without exposing credentials."""
+        with self._engine().connect() as conn:
+            rows = conn.execute(text("""
+                SELECT revision_no, snapshot FROM sources.source_history
+                WHERE source_id = :id ORDER BY revision_no
+            """), {"id": source_id}).mappings().all()
+        return [
+            {"revision_no": row["revision_no"], "source": self._prepare(row["snapshot"])[0]}
+            for row in rows
+        ]
