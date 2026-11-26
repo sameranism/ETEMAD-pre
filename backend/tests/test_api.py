@@ -182,3 +182,91 @@ def test_domestic_schedule_config_api(client, services) -> None:
     assert stale.status_code == 409 and stale.json()["code"] == "conflict"
     invalid = {**payload, "expected_revision": 1, "value": {**payload["value"], "stream": "foreign"}}
     assert client.put(path, json=invalid, headers=headers).status_code == 400
+
+
+def _editorial_preview_payload() -> dict[str, object]:
+    return {
+        "ruleset": {
+            "schema_version": "1.0",
+            "ruleset_id": "RULE-API-FIXTURE",
+            "revision": 1,
+            "stream": "domestic",
+            "desk": "all",
+            "replacement_rules": [{
+                "rule_id": "R-API-1",
+                "from_text": "عبارت قدیمی",
+                "to_text": "عبارت مصوب",
+                "mode": "auto_replace",
+                "applies_to": ["body"],
+                "exempt_quotes": True,
+                "requires_fact_check": False,
+            }],
+            "prohibited_content_categories": [],
+            "updated_at": "2026-11-27T00:00:00Z",
+        },
+        "source_text": "علی رضایی گفت بودجه ۱۲ میلیارد است.",
+        "draft_text": (
+            "علی رضایی گفت بودجه ۱۲ میلیارد است؛ عبارت قدیمی."
+        ),
+        "stream": "domestic",
+        "desk": "economy",
+        "field": "body",
+        "source_refs": ["NEWS-FIXTURE"],
+        "attributed_refs": ["NEWS-FIXTURE"],
+        "required_names": ["علی رضایی"],
+        "claim_evidence": {
+            "بودجه ۱۲ میلیارد است": ["بودجه ۱۲ میلیارد است"],
+        },
+    }
+
+
+def test_editorial_preview_requires_explicit_server_grant(client, services) -> None:
+    path = "/v1/editorial/rules/preview"
+    payload = _editorial_preview_payload()
+    assert client.post(path, json=payload).status_code == 401
+    headers = {"Authorization": f"Bearer {_token(services)}"}
+    assert client.post(path, json=payload, headers=headers).status_code == 403
+    services.grants.grant(
+        Grant("eic-1", "editor_in_chief", "editorial_workspace", "default", "preview")
+    )
+    response = client.post(path, json=payload, headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["proposed"].endswith("عبارت مصوب.")
+    assert body["quality"]["passed"] is True
+    assert body["quality"]["reason_codes"] == ["QUALITY_CHECKS_PASSED"]
+    assert services.audit_sink.entries()[-1].action == "editorial_workspace.preview"
+
+
+def test_editorial_preview_flags_changed_fact_and_preserves_input(client, services) -> None:
+    services.grants.grant(
+        Grant("eic-1", "editor_in_chief", "editorial_workspace", "default", "preview")
+    )
+    headers = {"Authorization": f"Bearer {_token(services)}"}
+    payload = _editorial_preview_payload()
+    payload["draft_text"] = "علی رضایی گفت «بودجه ۱۵ میلیارد است»."
+    original = json.loads(json.dumps(payload, ensure_ascii=False))
+    response = client.post("/v1/editorial/rules/preview", json=payload, headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["quality"]["passed"] is False
+    assert "FACT_NUMBER_MISMATCH" in body["quality"]["reason_codes"]
+    assert "FABRICATED_QUOTE" in body["quality"]["reason_codes"]
+    assert payload == original
+
+
+def test_editorial_preview_rejects_invalid_ruleset(client, services) -> None:
+    services.grants.grant(
+        Grant("eic-1", "editor_in_chief", "editorial_workspace", "default", "preview")
+    )
+    headers = {"Authorization": f"Bearer {_token(services)}"}
+    payload = _editorial_preview_payload()
+    payload["ruleset"] = {"schema_version": "1.0"}
+    response = client.post("/v1/editorial/rules/preview", json=payload, headers=headers)
+    assert response.status_code == 400
+    assert response.json()["code"] == "contract_invalid"
+    payload = _editorial_preview_payload()
+    payload["attributed_refs"] = ["NEWS-OTHER"]
+    response = client.post("/v1/editorial/rules/preview", json=payload, headers=headers)
+    assert response.status_code == 400
+    assert response.json()["code"] == "contract_invalid"
