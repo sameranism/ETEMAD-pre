@@ -18,6 +18,21 @@ The original 223-task matrix, prompts and package/project IDs remain unchanged. 
 
 For each slice read original manifest, prompt and references, implement only owned changes, run affected checks and mandatory CI, merge through protected PR, verify a private VPS deployment once when permitted, log actual evidence and continue. Unrelated blockers do not stop independent eligible work. See [ADR-019](../decisions/ADR-019-product-first-delivery.md). R01/P03 source persistence and the versioned snapshot/durable-claim slice are delivered; the next implementation is independently configurable domestic scheduling/checkpoint behavior, followed by R02. Do not merge temporary test workflows or infer acceptance from file counts.
 
+## Current R04 checkpoint — 2026-11-27
+
+- S04-001, S04-002 and S04-003 code is merged through protected PRs #95 and #96.
+  PR #96 exact head `465ef3fe73d71f2708003d03638dd509d99fd881`
+  passed backend/PostgreSQL CI, contracts, CodeQL, Bootstrap and Merge Guardian
+  before protected squash `43867947a784ef6e424d9a1c25a6cc49ba014e3c`.
+- B05 is not operationally connected to P27 yet: the modules have no authorized
+  API/UI path and the new commits are not deployed. The private runtime remains
+  `a8052e6d328f48dc33170f6e7dd7577ca7d2d8bc`; Shellway was offline at the
+  checkpoint.
+- Next WIP=1 is the smallest authorized P10/P11 API and dashboard integration.
+  Preserve source immutability, rights evidence, RBAC and no-publication
+  defaults. Merge after exact-head checks and deploy #95/#96 plus the integration
+  together when the VPS reconnects. PR #79 remains excluded.
+
 ## Current delivery checkpoint — 2026-11-26
 
 - WIP=1 capability [PR #86](https://github.com/sameranism/ETEMAD-pre/pull/86)
