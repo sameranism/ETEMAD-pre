@@ -8,14 +8,22 @@ records an audit entry. Route code never decides access on its own: it asks
 from __future__ import annotations
 
 from typing import Any
-from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Request, Response
+from pydantic import BaseModel, Field, SecretStr
 
 from backend.app.dependencies import Services, get_services
-from backend.core.auth import Principal, SessionInvalid, bearer_token, verify_session
-from backend.core.errors import APIError, ErrorCode
+from backend.core.auth import (
+    MAX_PASSWORD_LENGTH,
+    MIN_PASSWORD_LENGTH,
+    AuthenticationError,
+    PostgresAccountStore,
+    Principal,
+    bearer_token,
+    issue_session,
+    verify_session,
+)
+from backend.core.errors import APIError, ErrorCode, correlation_id_for
 from backend.core.health import health_report
 from backend.core.permissions import decide_access, require_access
 from backend.modules.domestic.api import build_router as build_domestic_router
@@ -45,15 +53,111 @@ def current_principal(request: Request, services: Services = Depends(get_service
     if not token:
         raise APIError(ErrorCode.UNAUTHORIZED)
     try:
-        return verify_session(token, services.session_key)
-    except SessionInvalid as exc:
-        raise APIError(ErrorCode.UNAUTHORIZED) from exc
+        principal = verify_session(token, services.session_key)
+        if principal.must_reset_password:
+            raise AuthenticationError("credential reset required")
+        if services.accounts is not None:
+            current = services.accounts.current(principal.subject_id)
+            if current.must_reset_password or not principal.session_marker or current != principal:
+                raise AuthenticationError("session is no longer valid")
+        return principal
+    except AuthenticationError:
+        raise APIError(ErrorCode.UNAUTHORIZED) from None
 
 
 def _correlation_id(request: Request) -> str:
-    """Use the caller's id when supplied, otherwise create one (never empty)."""
-    supplied = request.headers.get("X-Correlation-ID", "").strip()
-    return supplied or str(uuid4())
+    return correlation_id_for(request)
+
+
+class LoginInput(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: SecretStr = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+
+
+class FirstResetInput(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    temporary_password: SecretStr = Field(min_length=1, max_length=MAX_PASSWORD_LENGTH)
+    new_password: SecretStr = Field(min_length=MIN_PASSWORD_LENGTH, max_length=MAX_PASSWORD_LENGTH)
+
+
+def _auth_audit(
+    services: Services, request: Request, action: str, decision: str,
+    principal: Principal | None = None,
+) -> None:
+    services.auditor.record(
+        action=action,
+        actor_id=principal.subject_id if principal is not None else "anonymous",
+        actor_role=principal.role if principal is not None else "unknown",
+        resource_type="identity",
+        resource_id=principal.subject_id if principal is not None else "login",
+        decision=decision,
+        correlation_id=correlation_id_for(request),
+    )
+
+
+def _account_store(services: Services, request: Request, action: str) -> PostgresAccountStore:
+    store = services.accounts
+    if store is None:
+        raise APIError(ErrorCode.NOT_FOUND)
+    if not store.consume_attempt():
+        _auth_audit(services, request, action, "RATE_LIMITED")
+        raise APIError(ErrorCode.RATE_LIMITED)
+    return store
+
+
+def _session_response(principal: Principal, services: Services, response: Response) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    if principal.must_reset_password:
+        return {"schema_version": "1.0", "must_reset": True}
+    return {
+        "schema_version": "1.0",
+        "must_reset": False,
+        "access_token": issue_session(principal, services.session_key, ttl_seconds=900),
+        "token_type": "bearer",
+        "expires_in": 900,
+    }
+
+
+@router.get("/auth/status", tags=["auth"])
+def auth_status(response: Response, services: Services = Depends(get_services)) -> dict[str, str]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"schema_version": "1.0", "mode": "staff" if services.accounts is not None else "fixture"}
+
+
+@router.post("/auth/login", tags=["auth"])
+def login(
+    payload: LoginInput, request: Request, response: Response,
+    services: Services = Depends(get_services),
+) -> dict[str, Any]:
+    store = _account_store(services, request, "auth.login")
+    try:
+        principal = store.authenticate(payload.username, payload.password.get_secret_value())
+    except AuthenticationError:
+        _auth_audit(services, request, "auth.login", "DENIED")
+        raise APIError(ErrorCode.UNAUTHORIZED) from None
+    _auth_audit(services, request, "auth.login", "RESET_REQUIRED" if principal.must_reset_password else "ALLOWED", principal)
+    return _session_response(principal, services, response)
+
+
+@router.post("/auth/first-login/reset", tags=["auth"])
+def first_login_reset(
+    payload: FirstResetInput, request: Request, response: Response,
+    services: Services = Depends(get_services),
+) -> dict[str, Any]:
+    store = _account_store(services, request, "auth.first_reset")
+    try:
+        principal = store.reset_first_use(
+            payload.username, payload.temporary_password.get_secret_value(),
+            payload.new_password.get_secret_value(),
+        )
+    except AuthenticationError:
+        _auth_audit(services, request, "auth.first_reset", "DENIED")
+        raise APIError(ErrorCode.UNAUTHORIZED) from None
+    except ValueError:
+        _auth_audit(services, request, "auth.first_reset", "DENIED")
+        raise APIError(ErrorCode.CONTRACT_INVALID) from None
+    _auth_audit(services, request, "auth.first_reset", "ALLOWED", principal)
+    return _session_response(principal, services, response)
 
 
 def _authorize(
