@@ -77,3 +77,15 @@ jobs:
           name: backend-test-results
           path: backend-test-results.xml
           if-no-files-found: error
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build and test frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+          npm test
