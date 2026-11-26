@@ -12,6 +12,9 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Request
 
+from backend.core.errors import APIError, ErrorCode
+from backend.modules.domestic.scheduler import PollStateConflict
+
 Authorize = Callable[..., None]
 
 
@@ -44,7 +47,10 @@ def build_router(
             action="poll",
             correlation_id=_correlation_id(request),
         )
-        result = services.pipeline.poll_source(source_id)
+        try:
+            result = services.pipeline.poll_source(source_id)
+        except PollStateConflict:
+            raise APIError(ErrorCode.CONFLICT) from None
         return {
             "schema_version": "1.0",
             "source_id": result.source_id,
