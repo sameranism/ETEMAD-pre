@@ -145,3 +145,49 @@ def test_foreign_collector_rejects_unsafe_or_mismatched_document():
             collect_foreign(ForeignFeedResponse(FEED, body, 200), _approved_source())
     with pytest.raises(ValueError, match="source mismatch"):
         collect_foreign(ForeignFeedResponse("https://other.invalid/rss", RSS, 200), _approved_source())
+
+def _bridge_raw(**updates):
+    return {"schema_version": "1.0", "news_id": "NEWS-BRIDGE-FIXTURE", "stream": "foreign",
+            "source_id": "SRC-DE-FIXTURE", "source_country": "DE", "language": "de",
+            "original_url": "https://example.invalid/bridge/1", "original_title": "Fixture",
+            "original_text": "Synthetic summary", "subject_countries": [],
+            "collected_at": NOW.isoformat(), "content_scope": "summary",
+            "reuse_permission": "unverified", **updates}
+
+
+def test_bridge_signature_and_offline_resign():
+    from dataclasses import replace
+
+    from backend.modules.foreign.bridge import BridgeError, BridgeVerifier, sign_transfer
+
+    key = b"fixture-only-foreign-signing-key-0001"
+    verifier = BridgeVerifier({"foreign-fixture": key})
+    raw = _bridge_raw()
+    packet = sign_transfer(raw, sender="foreign-fixture", key=key, sent_at=1000)
+    result = verifier.verify(packet, now=1000)
+    assert result.raw == raw
+    assert result.envelope["payload_ref"] == "sha256:" + result.digest
+    assert result.envelope["classification"] == "internal"
+    for invalid in (replace(packet, body=packet.body + b" "),
+                    replace(packet, sent_at=1001), replace(packet, sender="unknown"),
+                    replace(packet, signature="0" * 64)):
+        with pytest.raises(BridgeError):
+            verifier.verify(invalid, now=1000)
+    with pytest.raises(BridgeError):
+        verifier.verify(packet, now=2000)
+    retry = sign_transfer(raw, sender="foreign-fixture", key=key, sent_at=2000)
+    assert verifier.verify(retry, now=2000).envelope == result.envelope
+    assert retry.signature != packet.signature
+
+
+@pytest.mark.parametrize("updates", [
+    {"stream": "domestic"}, {"content_scope": "full_text"},
+    {"content_scope": "metadata", "reuse_permission": "link_only"},
+    {"reuse_permission": "blocked"},
+])
+def test_bridge_denies_unsupported_rights(updates):
+    from backend.modules.foreign.bridge import BridgeError, sign_transfer
+
+    with pytest.raises(BridgeError):
+        sign_transfer(_bridge_raw(**updates), sender="foreign-fixture",
+                      key=b"fixture-only-foreign-signing-key-0001", sent_at=1000)
