@@ -42,6 +42,11 @@ class DomesticPollPlan:
     enabled: bool
     interval_seconds: int
 
+    def __post_init__(self) -> None:
+        _validate_interval(self.interval_seconds)
+        if type(self.enabled) is not bool:
+            raise ValueError("invalid poll enable flag")
+
     @classmethod
     def from_record(cls, record: Mapping[str, Any]) -> DomesticPollPlan:
         validate_payload("schedule_config", record)
