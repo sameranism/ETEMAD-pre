@@ -1,5 +1,23 @@
 # QUEUE — صف کار ETEMAD (به ترتیب وابستگی)
 
+## Active execution overlay — ADR-019 product-first (effective on protected merge)
+
+The original 223-task matrix, prompts and package/project IDs remain unchanged. The owner defers further account-lifecycle/MFA development and complex, unrelated verification to applicable integration/release milestones. Existing authentication and security enforcement remain active; privileged login and real external actions remain disabled until authorized. This supersedes the older "next account lifecycle" scheduling entry below, not its evidence or safety requirements.
+
+| Order | Projects / owning tasks | Delivery |
+|---|---|---|
+| R01 | P01/P02/P03/P05/P29; S01-005 first, S01-003/004/011..014/025, S02-001..006 | Durable sources, scoped snapshots, settings, scheduling, coordination; preserve existing news slice |
+| R02 | P04/P06; S02-008..014 | Foreign discovery and ingestion, authenticated bridge |
+| R03 | P07/P08/P09; S03-001..007 | Complete durable processing and routing |
+| R04 | P10..P14; S04-001..008 | Glossary, translator, editor, rights, images |
+| R05 | P26; S01-010 | Persistent archive and authorized retrieval |
+| R06 | P15..P19; S05-001..009 | Analysis, chat, metrics and reports |
+| R07 | P22..P25; S06-001..014 | Dry-run publishing and independent official adapters |
+| R08 | P27; active S02/S08 | UI delivered with each capability; complete dashboard |
+| R09 | S09/S10, deferred P28 | Applicable integration, backup/restore, advanced security and release |
+
+For each slice read original manifest, prompt and references, implement only owned changes, run affected checks and mandatory CI, merge through protected PR, verify a private VPS deployment once when permitted, log actual evidence and continue. Unrelated blockers do not stop independent eligible work. See [ADR-019](../decisions/ADR-019-product-first-delivery.md). R01/S01-005 is the next implementation. Do not merge temporary test workflows or infer acceptance from file counts.
+
 ## Current delivery checkpoint — 2026-11-26
 
 - R1 staff login/reset/revocation behavior from PR #82 is integrated, deployed
