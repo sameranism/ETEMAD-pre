@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+import os
 import time
+from pathlib import Path
+from uuid import uuid4
 
+import psycopg
 import pytest
+from fastapi.testclient import TestClient
+from psycopg import sql
+from sqlalchemy import text
+from sqlalchemy.engine import make_url
 
+from backend.app.dependencies import build_services
+from backend.app.main import create_app
 from backend.core.audit import REDACTED, Auditor, InMemoryAuditSink, sanitize
 from backend.core.auth import (
     MIN_PASSWORD_LENGTH,
+    AccountLimitReached,
     AuthenticationError,
     Principal,
     SessionInvalid,
@@ -237,3 +248,136 @@ def test_secret_reference_format_is_enforced() -> None:
 
 def test_authentication_error_is_the_common_base() -> None:
     assert issubclass(SessionInvalid, AuthenticationError)
+
+
+# --- PostgreSQL identity slice (disposable loopback databases only) ------------
+
+
+def test_persistent_identity_is_explicit_and_default_off() -> None:
+    services = build_services({})
+    assert services.accounts is None
+    with TestClient(create_app(services=services)) as client:
+        assert client.get("/v1/auth/status").json()["mode"] == "fixture"
+        result = client.post("/v1/auth/login", json={"username": "fixture", "password": "invalid"})
+        assert result.status_code == 404
+    with pytest.raises(ValueError, match="private staging"):
+        build_services({"ETEMAD_IDENTITY_STORAGE": "postgres"})
+
+
+@pytest.mark.skipif(not os.environ.get("ETEMAD_TEST_PG_ADMIN_URL"), reason="disposable PostgreSQL unset")
+def test_staff_identity_reset_permissions_and_limits(monkeypatch, tmp_path) -> None:
+    from alembic import command
+    from alembic.config import Config
+
+    admin = make_url(os.environ["ETEMAD_TEST_PG_ADMIN_URL"])
+    assert admin.host == "127.0.0.1" and admin.database == "postgres"
+    assert admin.username == "fixture_admin" and not admin.query
+    suffix = uuid4().hex[:12]
+    env = {
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_NEWS_STORAGE": "postgres", "ETEMAD_IDENTITY_STORAGE": "postgres",
+        "ETEMAD_SESSION_KEY": uuid4().hex + uuid4().hex,
+        "ETEMAD_OBJECT_ROOT": str(tmp_path / "objects"),
+    }
+    created = []
+    services_list = []
+    monkeypatch.chdir(Path(__file__).resolve().parents[1])
+    with psycopg.connect(admin.render_as_string(hide_password=False), autocommit=True) as control:
+        try:
+            for role in ("central", "domestic"):
+                name = f"etemad_test_{role}_{suffix}"
+                control.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+                created.append(name)
+                key = f"ETEMAD_DB_{role.upper()}_URL"
+                env[key] = admin.set(drivername="postgresql+psycopg", database=name).render_as_string(
+                    hide_password=False
+                )
+                monkeypatch.setenv(key, env[key])
+            command.upgrade(Config("alembic.ini"), "head")
+            command.upgrade(Config("alembic_domestic.ini"), "head")
+            services = build_services(env)
+            services_list.append(services)
+            store = services.accounts
+            assert store is not None
+            staff_id, initial = store.provision("fixture-staff", "staff")
+            _, privileged_initial = store.provision("fixture-owner", "owner")
+            _, other_initial = store.provision("fixture-other", "staff")
+            replacement = generate_first_use_credential()
+            grant = Grant(staff_id, "staff", "newsroom", "feed", "read")
+            services.grants.grant(grant)
+            assert not services.grants.lookup(staff_id, "staff", "newsroom", "feed", "read")
+
+            with TestClient(create_app(services=services)) as client:
+                assert client.get("/v1/auth/status").json()["mode"] == "staff"
+                login_path = "/v1/auth/login"
+                reset_path = "/v1/auth/first-login/reset"
+                assert client.post(login_path, json={
+                    "username": "fixture-owner", "password": privileged_initial,
+                }).status_code == 401
+                assert client.post(login_path, json={
+                    "username": "fixture-staff", "password": "incorrect",
+                }).status_code == 401
+                first = client.post(login_path, json={"username": "fixture-staff", "password": initial})
+                assert first.status_code == 200 and first.json()["must_reset"] is True
+                assert "access_token" not in first.json()
+                assert first.headers["Cache-Control"] == "no-store"
+                assert client.get("/v1/news").status_code == 401
+                fixture_token = issue_session(Principal(staff_id, "staff"), env["ETEMAD_SESSION_KEY"].encode())
+                assert client.get("/v1/news", headers={"Authorization": f"Bearer {fixture_token}"}).status_code == 401
+                reset = client.post(reset_path, json={
+                    "username": "fixture-staff", "temporary_password": initial,
+                    "new_password": replacement,
+                })
+                assert reset.status_code == 200
+                token = reset.json()["access_token"]
+                assert reset.json()["expires_in"] == 900
+                headers = {"Authorization": f"Bearer {token}"}
+                assert client.get("/v1/news", headers=headers).status_code == 200
+                assert client.post(login_path, json={
+                    "username": "fixture-staff", "password": initial,
+                }).status_code == 401
+                assert client.post(reset_path, json={
+                    "username": "fixture-other", "temporary_password": other_initial,
+                    "new_password": replacement,
+                }).status_code == 400
+                assert client.post(reset_path, json={
+                    "username": "fixture-staff", "temporary_password": initial,
+                    "new_password": generate_first_use_credential(),
+                }).status_code == 401
+            services.registry.dispose()
+
+            restarted = build_services(env)
+            services_list.append(restarted)
+            assert restarted.accounts is not None
+            with TestClient(create_app(services=restarted)) as client:
+                assert client.get("/v1/news", headers=headers).status_code == 200
+                restarted.grants.revoke(grant)
+                assert client.get("/v1/news", headers=headers).status_code == 403
+                restarted.grants.grant(grant)
+                assert client.get("/v1/news", headers=headers).status_code == 200
+                for index in range(7):
+                    restarted.accounts.provision(f"fixture-extra-{index}", "staff")
+                with pytest.raises(AccountLimitReached):
+                    restarted.accounts.provision("fixture-eleventh", "staff")
+                engine = restarted.registry.engine("central")
+                with engine.begin() as conn:
+                    assert conn.execute(text("SELECT count(*) FROM identity.users WHERE is_active")).scalar_one() == 10
+                    rows = conn.execute(text("SELECT password_hash FROM identity.users")).scalars().all()
+                    assert all(initial not in value and replacement not in value for value in rows)
+                    records = conn.execute(text("SELECT action, decision, details_json FROM audit.audit_entries")).all()
+                    assert any(row.action == "auth.first_reset" and row.decision == "ALLOWED" for row in records)
+                    assert any(row.action == "auth.login" and row.decision == "DENIED" for row in records)
+                    assert initial not in str(records) and replacement not in str(records)
+                    conn.execute(text("UPDATE identity.users SET is_active = false WHERE user_id = :id"), {"id": staff_id})
+                assert client.get("/v1/news", headers=headers).status_code == 401
+                for _ in range(30):
+                    if not restarted.accounts.consume_attempt():
+                        break
+                assert client.post(login_path, json={
+                    "username": "fixture-staff", "password": replacement,
+                }).status_code == 429
+        finally:
+            for service in services_list:
+                service.registry.dispose()
+            for name in reversed(created):
+                control.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
