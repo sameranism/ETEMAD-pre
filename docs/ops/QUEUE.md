@@ -1,5 +1,21 @@
 # QUEUE — صف کار ETEMAD (به ترتیب وابستگی)
 
+## Current delivery checkpoint — 2026-11-26
+
+- R1 staff login/reset/revocation behavior from PR #82 is integrated, deployed
+  privately and operationally verified with a synthetic account on exact release
+  `97eb055c82419a6017440d6c9f3e75e862b57c02`.
+- The account was disabled after the check; privileged roles remain denied and
+  no live source, external output, real credential or public listener was used.
+- WIP remains one. The next capability is operator account lifecycle plus
+  auditable account/grant changes, then privileged MFA. Because this changes the
+  authentication security and persistent identity-data boundary, implementation
+  is held at the standing explicit-approval condition. Do not substitute a
+  parallel task or mark this capability accepted.
+- Gate-00 and Gate-01 remain open. This bounded operational acceptance is not a
+  formal Gate closure. The 223/216/7 matrix counts remain authoritative; no
+  percentage is inferred from files, commits or tests.
+
 > قاعده: از بالا به پایین. ردیف بعد از احراز پیش‌نیازها و ثبت نتیجهٔ کنترل‌های خودکار باز می‌شود.
 > **هرگز از صف بیرون نرو** مگر صف خالی باشد؛ آن‌وقت اولین تسک وابسته‌برآورده از ماتریس ۲۲۳ تسکی را اضافه کن.
 > کار هر تسک = «بررسی وجود فایل با `git ls-files` → اگر موجود بود ولی به DB/API/آزمون وصل نیست، کار = سیم‌کشی، نه بازنویسی».

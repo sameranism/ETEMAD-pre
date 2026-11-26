@@ -1,5 +1,36 @@
 # ETEMAD execution state
 
+## Latest verified operational checkpoint — 2026-11-26
+
+- Protected main and the active private VPS release are both
+  `97eb055c82419a6017440d6c9f3e75e862b57c02` from
+  [PR #82](https://github.com/sameranism/ETEMAD-pre/pull/82). The exact-main
+  backend, contracts, CodeQL and Merge Guardian checks passed.
+- The private service remains loopback-only at `127.0.0.1:8765`, with separate
+  PostgreSQL databases and synthetic fixture input. Health and UI returned 200,
+  anonymous news returned 401, and the obsolete demo route returned 404.
+- The previously missing interactive staff path was exercised on the active
+  release with one generated synthetic staff account: first login returned 200
+  with reset required and no token; first-use reset returned 200 and a bounded
+  900-second session; authorized news returned 200; the old credential returned
+  401; the replacement credential logged in with 200; grant revocation returned
+  403; and the existing session returned 401 after the account was disabled.
+  Persistent audit rows recorded RESET_REQUIRED, ALLOWED and DENIED login
+  decisions plus the allowed reset. No credential was printed or stored in
+  evidence, and the synthetic account remains inactive. The matching operational
+  record is [Issue #78](https://github.com/sameranism/ETEMAD-pre/issues/78).
+- This accepts the bounded private-staging staff login/reset/revocation behavior
+  of the #82 slice. It does not claim privileged MFA, an operator account
+  lifecycle, production activation, or closure of Gate-00/Gate-01.
+- Next R1 capability: an auditable operator lifecycle for provisioning,
+  grant/revoke and account disablement, followed by privileged MFA. The standing
+  owner rule requires explicit approval before modifying the authentication
+  security and persistent identity-data boundary, so no such code change is
+  started in this evidence-only checkpoint.
+- Matrix accounting is unchanged: 223 total rows, 216 active and seven deferred
+  studio rows. File presence and test counts are not task acceptance; a complete
+  accepted-task percentage is still not established.
+
 ## Production implementation scheduling — 2026-11-26
 
 The owner rejects prototype-only deliverables. [ADR-017](../decisions/ADR-017-production-code-staging.md) allows real task-owned implementation on parked branches, subject to authoritative interfaces. Integration/acceptance still requires all dependency Gates and exact-head checks. No new runtime implementation or gate acceptance is claimed by this decision. First candidate S03-006; continue Gate-00 evidence. Effective on protected merge.
