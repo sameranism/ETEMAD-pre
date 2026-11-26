@@ -4,7 +4,7 @@ import Settings from "../features/settings/Settings";
 import { authMode, type AuthMode } from "../lib/auth";
 import NewsDesk, { type NewsFeedRecord } from "../features/newsroom/NewsDesk";
 import SourcesManager, {
-  parseSources, type SourceRecord,
+  ForeignMonitor, parseSources, type SourceRecord,
 } from "../features/sources/SourcesManager";
 
 type LoadState = "ready" | "loading" | "error" | "forbidden";
@@ -201,6 +201,7 @@ export default function App() {
         ) : (
           <>
             <SourcesManager sources={sources} state={sourceState} />
+            <ForeignMonitor key={token} token={token} />
             <Settings key={token} token={token} />
             <NewsDesk items={items} state={state} />
             {state === "error" && (
