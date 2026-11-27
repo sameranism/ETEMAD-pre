@@ -111,6 +111,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert tables("domestic") == domestic_tables
             assert tables("central") == central_tables
             assert tables("foreign") == set()
+            _exercise_durable_settings()
             _exercise_domestic_identity(domestic)
             _exercise_processing_history(central)
             _exercise_source_registry(central)
@@ -140,6 +141,74 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
         finally:
             for database in reversed(created):
                 control.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+
+
+def _exercise_durable_settings():
+    import json
+
+    from backend.core.output_switches import default_off_switches
+    from backend.core.settings_service import PostgresRevisionStore, RevisionConflict
+
+    registry = DatabaseRegistry()
+    second = DatabaseRegistry()
+    store = PostgresRevisionStore(registry)
+    actor = "fixture-settings-owner"
+    examples = BACKEND.parent / "source" / "contracts" / "examples"
+    configs = [
+        ("output_controls", "controls-main", "global", {
+            **default_off_switches().record, "updated_by": actor,
+        }),
+        ("schedule_config", "SCH-FOREIGN", "foreign", json.loads(
+            (examples / "schedule_config.example.json").read_text())),
+        ("ai_models_config", "MODELS-01", "global", json.loads(
+            (examples / "ai_models_config.example.json").read_text())),
+        ("news_framework", "FW-01", "foreign", json.loads(
+            (examples / "news_framework.example.json").read_text())),
+    ]
+    try:
+        for contract, identity, scope, value in configs:
+            record = store.compare_and_append(contract_name=contract, config_id=identity,
+                scope=scope, value=value, actor_id=actor, expected_revision=0)
+            assert record.revision == 1
+        registry.dispose()
+        restarted = PostgresRevisionStore(second)
+        for contract, identity, scope, value in configs:
+            record = restarted.get(contract, identity, scope)
+            assert record is not None and record.value == value and record.updated_by == actor
+        assert len([a for a in restarted.audit_entries() if a.actor_id == actor]) == 4
+        controls = configs[0][3]
+        with pytest.raises(RevisionConflict):
+            restarted.compare_and_append(contract_name="output_controls", config_id="controls-main",
+                scope="global", value=controls, actor_id=actor, expected_revision=0)
+        changed = {**controls, "revision": 2, "publishing": {**controls["publishing"], "enabled": True}}
+        def update():
+            try:
+                restarted.compare_and_append(contract_name="output_controls", config_id="controls-main",
+                    scope="global", value=changed, actor_id=actor, expected_revision=1)
+                return True
+            except RevisionConflict:
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(lambda _: update(), range(2))) == [False, True]
+        assert restarted.get("output_controls", "controls-main", "global").value == changed
+        # The integration suite uses a default-off runtime after this exercise.
+        restarted.compare_and_append(contract_name="output_controls", config_id="controls-main",
+            scope="global", value={**controls, "revision": 3}, actor_id=actor, expected_revision=2)
+        with pytest.raises(RevisionConflict):
+            restarted.compare_and_append(contract_name="output_controls", config_id="MODELS-01",
+                scope="global", value=controls, actor_id=actor, expected_revision=0)
+        assert restarted.get("output_controls", "MODELS-01", "global") is None
+        invalid = deepcopy(configs[2][3])
+        invalid["tasks"][0]["credential_ref"] = "not-a-reference"
+        with pytest.raises(ValueError):
+            restarted.compare_and_append(contract_name="ai_models_config", config_id="MODELS-01",
+                scope="global", value=invalid, actor_id=actor, expected_revision=1)
+        # Clear only synthetic settings from the disposable integration database.
+        with second.engine("central").begin() as conn:
+            conn.execute(text("DELETE FROM control.config_revisions WHERE changed_by=:actor"), {"actor": actor})
+    finally:
+        registry.dispose()
+        second.dispose()
 
 
 def _exercise_processing_history(central):

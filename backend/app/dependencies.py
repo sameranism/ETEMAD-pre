@@ -37,7 +37,8 @@ from backend.core.settings_service import (
     DOMESTIC_INGEST_CONFIG_ID,
     DOMESTIC_INGEST_SCOPE,
     InMemoryRevisionStore,
-    PostgresIngestScheduleStore,
+    PostgresRevisionStore,
+    RevisionStore,
     SettingsService,
 )
 from backend.core.sources_service import PostgresSourceService, SourceService
@@ -183,11 +184,11 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     schedule_storage = environ.get("ETEMAD_SCHEDULE_STORAGE", "fixture")
     if schedule_storage not in {"fixture", "postgres"}:
         raise ValueError("invalid ETEMAD_SCHEDULE_STORAGE")
-    revision_store: InMemoryRevisionStore
+    revision_store: RevisionStore
     if schedule_storage == "postgres":
         if source_storage != "postgres":
             raise ValueError("persistent schedule requires private PostgreSQL source registry")
-        revision_store = PostgresIngestScheduleStore(registry)
+        revision_store = PostgresRevisionStore(registry)
     else:
         revision_store = InMemoryRevisionStore()
     settings = SettingsService(revision_store, grant_store, credential_ref_check=lambda ref: bool(ref))
@@ -200,11 +201,9 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     news_archive = PostgresNewsArchive(registry.engine("central"), objects) if storage == "postgres" else None
 
     def switches() -> OutputSwitches:
-        stored = settings.get_latest("output_controls", "controls-main", "global")
-        if stored is None:
-            return default_off_switches()
         try:
-            return OutputSwitches.from_record(stored.value)
+            stored = settings.get_latest("output_controls", "controls-main", "global")
+            return default_off_switches() if stored is None else OutputSwitches.from_record(stored.value)
         except Exception:  # noqa: BLE001 - a broken config must not enable outputs
             _LOG.error("stored output_controls is invalid; falling back to all-off")
             return default_off_switches()
