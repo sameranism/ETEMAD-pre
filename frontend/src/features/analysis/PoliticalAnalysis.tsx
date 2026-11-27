@@ -7,6 +7,7 @@ type Result = { topic?: string; claims?: Claim[]; answer?: string; uncertainties
 type Envelope = { result: Result | null; evidence: EvidenceRef[] };
 type Report = { title: string; sections: { heading: string; body: string; source_refs: string[] }[] };
 type ReportEnvelope = { result: Report | null; evidence: EvidenceRef[] };
+type SavedMemory = { topic: string; days: 1 | 7 | 30; stream: "all" | "domestic" | "foreign" };
 const isObject = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 const strings = (x: unknown): x is string[] => Array.isArray(x) && x.every(y => typeof y === "string");
 function safeUrl(value: string) {
@@ -69,6 +70,17 @@ export function composeChatQuery(question: string, context: string | null): stri
   return query;
 }
 
+export function parseMemory(value: unknown): SavedMemory | null {
+  if (!isObject(value) || value.schema_version !== "1.0") throw new Error("Invalid memory");
+  const item = value.memory;
+  if (item === null) return null;
+  if (!isObject(item) || typeof item.topic !== "string" || !item.topic.trim() ||
+      Array.from(item.topic).length > 500 || ![1, 7, 30].includes(Number(item.days)) ||
+      typeof item.days !== "number" || !["all", "domestic", "foreign"].includes(String(item.stream)) ||
+      typeof item.updated_at !== "string" || !Number.isFinite(Date.parse(item.updated_at))) throw new Error("Invalid memory");
+  return { topic: item.topic, days: item.days, stream: item.stream } as SavedMemory;
+}
+
 export default function PoliticalAnalysis({ token }: { token: string }) {
   // A new authentication session discards the previous conversation state.
   return <AnalysisSession key={token} token={token} />;
@@ -88,6 +100,31 @@ function AnalysisSession({ token }: { token: string }) {
   const [message, setMessage] = useState("");
   const active = useRef<AbortController | null>(null);
   useEffect(() => () => active.current?.abort(), []);
+  async function memoryAction(method: "GET" | "PUT" | "DELETE") {
+    if (busy || (method === "PUT" && !context)) return;
+    const controller = new AbortController(); active.current = controller;
+    setBusy(true); setMessage("");
+    try {
+      const response = await fetch("/v1/analysis/chat/memory", {
+        method, signal: controller.signal, credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { Authorization: "Bearer " + token, ...(method === "PUT" ? { "Content-Type": "application/json" } : {}) },
+        ...(method === "PUT" ? { body: JSON.stringify({ topic: context, days: Number(days), stream: stream || "all" }) } : {})
+      });
+      if (!response.ok) throw new Error("memory unavailable");
+      const memory = parseMemory(await response.json());
+      if (controller.signal.aborted) return;
+      if (method === "GET" && memory) {
+        setContext(memory.topic); setDays(String(memory.days)); setStream(memory.stream === "all" ? "" : memory.stream);
+        setFollowup(true); setResult(null); setMessage("موضوع ذخیره‌شده بازیابی شد.");
+      } else if (method === "GET") setMessage("موضوع ذخیره‌شده‌ای وجود ندارد.");
+      else if (method === "PUT" && memory) setMessage("موضوع برای نشست‌های بعدی ذخیره شد.");
+      else if (method === "DELETE" && memory === null) {
+        setContext(null); setFollowup(false); setResult(null); setMessage("حافظه ذخیره‌شده حذف شد.");
+      } else throw new Error("memory response mismatch");
+    } catch {
+      if (!controller.signal.aborted) setMessage("حافظه پایدار در دسترس نیست یا مجوز کافی وجود ندارد.");
+    } finally { if (!controller.signal.aborted) setBusy(false); }
+  }
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || !query.trim()) return;
@@ -145,7 +182,13 @@ function AnalysisSession({ token }: { token: string }) {
           <button type="button" onClick={() => { setContext(null); setFollowup(false); setResult(null); }}>
             پاک کردن زمینه گفت‌وگو
           </button>
-          <p>زمینه فقط در این نشست مرورگر باقی می‌ماند؛ منابع دوباره با مجوز جاری بازیابی می‌شوند.</p>
+          <p>منابع دوباره با مجوز جاری بازیابی می‌شوند؛ پاسخ‌ها و اسناد در حافظه ذخیره نمی‌شوند.</p>
+          <button type="button" onClick={() => void memoryAction("PUT")}>ذخیره موضوع برای نشست بعدی</button>
+        </div>}
+        {mode === "chat" && <div className="grid gap-1">
+          <button type="button" onClick={() => void memoryAction("GET")}>بازیابی موضوع ذخیره‌شده</button>
+          <button type="button" onClick={() => void memoryAction("DELETE")}>حذف حافظه پایدار من</button>
+          <p>ذخیره اختیاری است؛ فقط موضوعی که خودتان وارد کرده‌اید و بازه و جریان انتخاب‌شده ذخیره می‌شود.</p>
         </div>}
         <label>بازه <select value={days} onChange={event => {
           setDays(event.target.value); setContext(null); setFollowup(false); setResult(null);

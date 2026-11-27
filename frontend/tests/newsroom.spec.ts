@@ -1,4 +1,4 @@
-import PoliticalAnalysis, { composeChatQuery, parseAnalysis, parseReport } from "../src/features/analysis/PoliticalAnalysis";
+import PoliticalAnalysis, { composeChatQuery, parseAnalysis, parseMemory, parseReport } from "../src/features/analysis/PoliticalAnalysis";
 import { parseImages } from "../src/features/images/ImageWorkspace";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -289,6 +289,13 @@ describe("internal image renditions", () => {
 });
 
 describe("archive-backed intelligence", () => {
+  it("validates the opt-in saved topic without requiring cached evidence", () => {
+    const memory = { topic: "بودجه", days: 7, stream: "domestic", updated_at: "2026-11-27T00:00:00Z" };
+    expect(parseMemory({ schema_version: "1.0", memory })).toEqual({ topic: "بودجه", days: 7, stream: "domestic" });
+    expect(parseMemory({ schema_version: "1.0", memory: null })).toBeNull();
+    expect(() => parseMemory({ schema_version: "1.0", memory: { ...memory, days: 500 } })).toThrow();
+    expect(() => parseMemory({ schema_version: "1.0", memory: { ...memory, stream: "executive_private" } })).toThrow();
+  });
   it("uses explicit bounded previous-topic context without cached evidence", () => {
     expect(composeChatQuery("چه شد؟", "بودجه ۱۴۰۵")).toBe("چه شد؟\nبودجه ۱۴۰۵");
     expect(composeChatQuery("موضوع تازه", null)).toBe("موضوع تازه");
