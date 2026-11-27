@@ -604,6 +604,9 @@ def _exercise_editorial_workspace(central):
             assert second["version"] == 2 and second["article"]["status"] == "held"
             assert "FACT_NUMBER_MISMATCH" in second["translation"]["warnings"]
             assert "DIRECT_QUOTE_MISMATCH" in second["translation"]["warnings"]
+            current = client.get(path, headers=headers).json()
+            assert current["saved"] == second
+            assert current["latest_version"] == current["saved"]["version"]
             old = client.get(path + "?version=1", headers=headers).json()
             assert old["saved"] == saved and old["latest_version"] == 2
             assert [r["version"] for r in old["history"]] == [2, 1]
