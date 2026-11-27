@@ -119,6 +119,18 @@ class PostgresAuditSink:
             """), params)
 
 
+    def recent_operations(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        if not 1 <= limit <= 100:
+            raise ValueError("invalid audit page")
+        with self._registry.engine("central").connect() as conn:
+            rows = conn.execute(text("""
+                SELECT occurred_at,actor_role,action,decision FROM audit.audit_entries
+                WHERE resource_type IN ('identity','config','source_registry','operations','publication_workspace')
+                ORDER BY occurred_at DESC,audit_id LIMIT :limit
+            """), {"limit": limit}).mappings()
+            return [{**dict(row), "occurred_at": row["occurred_at"].isoformat()} for row in rows]
+
+
 class Auditor:
     """Builds validated entries and forwards them to the configured sink."""
 

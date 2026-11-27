@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, SecretStr
 from backend.app.archive_api import build_router as build_archive_router
 from backend.app.dependencies import Services, get_services
 from backend.app.intelligence_api import build_router as build_intelligence_router
+from backend.app.ui_api import build_router as build_ui_router
 from backend.core.auth import (
     MAX_PASSWORD_LENGTH,
     MIN_PASSWORD_LENGTH,
@@ -28,6 +29,7 @@ from backend.core.auth import (
 from backend.core.errors import APIError, ErrorCode, correlation_id_for
 from backend.core.health import health_report
 from backend.core.permissions import decide_access, require_access
+from backend.core.sources_service import SourceNotAllowed, SourceNotFound
 from backend.modules.domestic.api import build_router as build_domestic_router
 from backend.modules.editorial.api import build_router as build_editorial_router
 from backend.modules.foreign.api import build_router as build_foreign_router
@@ -337,6 +339,25 @@ def news_feed(
     )
     services.pipeline.process_pending()
     items = services.pipeline.feed(limit=max(1, min(limit, 200)))
+    if principal.role == "staff":
+        scoped = []
+        for item in items:
+            if decide_access(principal.subject_id, principal.role, "newsroom", item["news_id"],
+                             "read", services.grants)["allowed"] is not True:
+                continue
+            desks = [desk for desk in item["desks"] if decide_access(
+                principal.subject_id, principal.role, "desk", desk, "read", services.grants)["allowed"] is True]
+            if not desks:
+                continue
+            try:
+                source = services.sources.require_usable(item["source_id"], stream=item["stream"])
+            except (SourceNotFound, SourceNotAllowed):
+                continue
+            scopes = {"metadata": 0, "summary": 1, "full_text": 2}
+            if scopes.get(source["license_scope"], -1) < scopes[item["content_scope"]]:
+                continue
+            scoped.append({**item, "desks": desks})
+        items = scoped
     return {"schema_version": "1.0", "count": len(items), "items": items}
 
 
@@ -414,4 +435,9 @@ router.include_router(
         authorize=_authorize,
         correlation_id=_correlation_id,
     )
+)
+
+router.include_router(
+    build_ui_router(services_dep=get_services, principal_dep=current_principal,
+                    authorize=_authorize, correlation_id=_correlation_id)
 )
