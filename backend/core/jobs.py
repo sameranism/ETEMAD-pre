@@ -13,6 +13,9 @@ from threading import Lock
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
 
 class JobState(str, Enum):
     QUEUED = "queued"
@@ -200,3 +203,103 @@ class JobQueue:
             for job in self._jobs.values():
                 counts[job.state.value] = counts.get(job.state.value, 0) + 1
             return counts
+
+
+class PostgresWorkflowJobs:
+    """Durable, scoped P29 queue. No external work is executed here.
+
+    A lost lease is failed, never blindly retried: the worker may already have
+    performed a side effect. A subsequent retry needs fresh revalidation.
+    """
+    def __init__(self, engine: Engine) -> None:
+        if engine.dialect.name != "postgresql":
+            raise ValueError("workflow jobs require PostgreSQL")
+        self._engine = engine
+
+    @staticmethod
+    def _scope(project: str, stream: str) -> None:
+        if (stream, project) not in {("foreign", "P12"), ("domestic", "P13"), ("manual", "P13")}:
+            raise ValueError("invalid workflow scope")
+
+    def claim(self, *, project: str, stream: str, lease_seconds: int = 120) -> dict[str, Any] | None:
+        self._scope(project, stream)
+        if not 1 <= lease_seconds <= 900:
+            raise ValueError("invalid lease duration")
+        with self._engine.begin() as conn:
+            # Unknown completion is retained for explicit review, never sent again automatically.
+            conn.execute(text("""
+                UPDATE orchestration.jobs SET state='failed',last_error='lease_expired',
+                    lease_token=NULL,lease_until=NULL,updated_at=now()
+                WHERE project_id=:project AND stream=:stream AND state='running' AND lease_until<=now()
+            """), {"project": project, "stream": stream})
+            conn.execute(text("""
+                UPDATE orchestration.jobs SET state='failed',last_error='deadline_expired',updated_at=now()
+                WHERE project_id=:project AND stream=:stream AND state='queued' AND deadline_at<=now()
+            """), {"project": project, "stream": stream})
+            row = conn.execute(text("""
+                WITH picked AS (
+                  SELECT job_id FROM orchestration.jobs WHERE project_id=:project AND stream=:stream
+                    AND state='queued' AND attempts<max_attempts AND deadline_at>now()
+                  ORDER BY created_at,job_id LIMIT 1 FOR UPDATE SKIP LOCKED
+                )
+                UPDATE orchestration.jobs j SET state='running',attempts=attempts+1,
+                    lease_token=:token,lease_until=LEAST(deadline_at,now()+:seconds*interval '1 second'),
+                    last_error=NULL,updated_at=now() FROM picked WHERE j.job_id=picked.job_id
+                RETURNING j.*
+            """), {"project": project, "stream": stream, "token": str(uuid4()),
+                   "seconds": lease_seconds}).mappings().one_or_none()
+            return dict(row) if row is not None else None
+
+    def finish(self, *, job_id: str, lease_token: str, success: bool) -> None:
+        with self._engine.begin() as conn:
+            row = conn.execute(text("""
+                UPDATE orchestration.jobs SET state=:state,last_error=:error,
+                    lease_token=NULL,lease_until=NULL,updated_at=now()
+                WHERE job_id=:id AND state='running' AND lease_token=:token AND lease_until>now()
+                RETURNING job_id
+            """), {"id": job_id, "token": lease_token, "state": "done" if success else "failed",
+                   "error": None if success else "job_failed"}).scalar_one_or_none()
+            if row is None:
+                raise InvalidTransition("workflow lease is stale")
+
+    def hold(self, *, job_id: str) -> None:
+        with self._engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE orchestration.jobs SET state='held',updated_at=now()
+                WHERE job_id=:id AND state='queued' RETURNING job_id
+            """), {"id": job_id}).scalar_one_or_none()
+            if result is None:
+                raise InvalidTransition("only a queued workflow may be held")
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self._engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT job_id,project_id,stream,state,attempts,max_attempts,last_error,deadline_at,
+                       created_at,updated_at,correlation_id
+                FROM orchestration.jobs WHERE job_id=:id
+            """), {"id": job_id}).mappings().one_or_none()
+            return dict(row) if row is not None else None
+
+    def retry(self, *, job_id: str, revalidate: Callable[[Mapping[str, Any]], bool]) -> None:
+        with self._engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT * FROM orchestration.jobs WHERE job_id=:id AND state IN ('failed','held')
+                    AND attempts<max_attempts AND deadline_at>now()
+            """), {"id": job_id}).mappings().one_or_none()
+        if row is None or revalidate(dict(row)) is not True:
+            raise InvalidTransition("workflow retry not authorized")
+        with self._engine.begin() as conn:
+            result = conn.execute(text("""
+                UPDATE orchestration.jobs SET state='queued',last_error=NULL,updated_at=now()
+                WHERE job_id=:id AND state=:state AND attempts=:attempts AND updated_at=:updated
+                    AND attempts<max_attempts AND deadline_at>now() RETURNING job_id
+            """), {"id": job_id, "state": row["state"], "attempts": row["attempts"],
+                   "updated": row["updated_at"]}).scalar_one_or_none()
+            if result is None:
+                raise InvalidTransition("workflow changed during revalidation")
+
+    def counts(self) -> dict[str, int]:
+        with self._engine.connect() as conn:
+            return dict(conn.execute(text("""
+                SELECT state,count(*) FROM orchestration.jobs GROUP BY state
+            """)).tuples().all())

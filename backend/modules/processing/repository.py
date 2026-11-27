@@ -10,7 +10,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
@@ -104,8 +104,11 @@ class ProcessingRepository:
 class PostgresProcessingRepository:
     """Central PostgreSQL store; fixture wiring remains unchanged until integration."""
 
-    def __init__(self, registry: DatabaseRegistry) -> None:
+    def __init__(self, registry: DatabaseRegistry, *,
+                 on_revision: Callable[[Connection, Mapping[str, Any], Mapping[str, Any], int, str], None]
+                 | None = None) -> None:
         self._registry = registry
+        self._on_revision = on_revision
 
     def _engine(self) -> Engine:
         engine = self._registry.engine("central")
@@ -164,7 +167,20 @@ class PostgresProcessingRepository:
             conn.execute(text(_UPSERT_CLUSTER), params)
             conn.execute(text(_UPSERT_CLASSIFICATION), params)
             _append_history(conn, news_id, revision + 1, item, digest)
+            if self._on_revision is not None:
+                self._on_revision(conn, item["classification"], item["routing"], revision + 1, digest)
         return ProcessingItem(**item)
+
+    def get_revision(self, news_id: str, revision: int) -> ProcessingItem | None:
+        """Resolve a trusted internal handoff against the immutable producer revision."""
+        if revision < 1:
+            raise ValueError("invalid processing revision")
+        with self._engine().connect() as conn:
+            record = conn.execute(text("""
+                SELECT snapshot FROM processing.artifact_history
+                WHERE news_id=:id AND revision_no=:revision
+            """), {"id": news_id, "revision": revision}).scalar_one_or_none()
+        return ProcessingItem(**record) if record is not None else None
 
     def _read(self, suffix: str, params: Mapping[str, Any]) -> list[ProcessingItem]:
         with self._engine().connect() as conn:

@@ -9,11 +9,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
+from urllib.parse import quote
+from uuid import NAMESPACE_URL, uuid5
+
+from sqlalchemy.engine import Connection
 
 from backend.core.archive import ArchiveStore, build_archive_record, object_key
 from backend.core.contracts import validate_payload
 from backend.core.events import EventBus, make_event
 from backend.core.jobs import Job, JobQueue, JobState
+from backend.core.outbox import PostgresOutbox
 from backend.core.output_switches import OutputSwitches
 
 
@@ -107,3 +112,28 @@ class Orchestrator:
                 self._jobs.hold(job.job_id, reason)
             return {"allowed": False, "reason": reason, "switch_revision": switches.revision}
         return {"allowed": True, "reason": "enabled", "switch_revision": switches.revision}
+
+
+class ProcessingHandoff:
+    """Translate the existing P09 route into a versioned P29 event reference."""
+    def __init__(self, outbox: PostgresOutbox) -> None:
+        self._outbox = outbox
+
+    def record(self, conn: Connection, classified: Mapping[str, Any], routing: Mapping[str, Any],
+               revision: int, digest: str) -> None:
+        validate_payload("classified_news", classified)
+        news_id = str(classified["news_id"])
+        stream = str(classified["stream"])
+        project = str(routing.get("target_project", ""))
+        if routing.get("news_id") != news_id or revision < 1:
+            raise ValueError("invalid processing handoff identity")
+        identity = str(uuid5(NAMESPACE_URL, f"etemad:P09:{news_id}:{revision}:{digest}"))
+        event = make_event(event_type="news.classified", producer_project="P09",
+                           object_id=news_id, correlation_id=identity, event_id=identity,
+                           idempotency_key=identity, classification="internal",
+                           occurred_at=str(classified["classified_at"]),
+                           payload_ref=f"processing/history/{quote(news_id, safe='')}/{revision}")
+        self._outbox.append_in_transaction(conn, event, stream=stream, project=project)
+
+    def flush(self) -> int:
+        return self._outbox.dispatch_to_jobs()
