@@ -9,7 +9,8 @@ from typing import Any, Callable, Literal
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from backend.core.ai_gateway import BudgetExceeded, GatewayDisabled, UnknownTask
+from backend.core.ai_gateway import BeforeProviderCall, BudgetExceeded, GatewayDisabled, UnknownTask
+from backend.core.chat_provider import ProviderResponseError
 from backend.core.errors import APIError, ErrorCode
 from backend.core.sources_service import SourceNotAllowed, SourceNotFound
 from backend.modules.editorial.glossary import EditorialGlossary
@@ -255,7 +256,7 @@ def build_router(
             raise APIError(ErrorCode.CONFLICT) from None
         except BudgetExceeded:
             raise APIError(ErrorCode.RATE_LIMITED) from None
-        except (GatewayDisabled, UnknownTask):
+        except (BeforeProviderCall, GatewayDisabled, UnknownTask, ProviderResponseError):
             raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE) from None
         except ValueError:
             raise APIError(ErrorCode.CONTRACT_INVALID) from None

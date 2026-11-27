@@ -19,6 +19,7 @@ from typing import Callable, Mapping
 from fastapi import Request
 from sqlalchemy.engine import make_url
 
+from backend.app.editorial_runtime import build_editorial_runtime
 from backend.app.foreign_workflow import ForeignWorkflow, build_foreign_fixture_workflow
 from backend.app.pipeline import IngestPipeline
 from backend.core.archive import InMemoryArchiveStore, PostgresNewsArchive
@@ -248,6 +249,11 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
             registry.engine("foreign"), registry.engine("central"), sources, pipeline,
         )
 
+    generator = build_editorial_runtime(
+        environ, registry.engine("central") if storage == "postgres" else None,
+        private_identity=accounts is not None, persistent_sources=source_storage == "postgres",
+    )
+
     return Services(
         registry=registry,
         session_key=session_key,
@@ -269,6 +275,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         news_archive=news_archive,
         chat_memory=PostgresChatMemory(registry.engine("central")) if storage == "postgres" else None,
         images=ImageRepository(registry.engine("central"), objects) if storage == "postgres" else None,
+        editorial_generator=generator,
         editorial=EditorialRepository(registry.engine("central")) if storage == "postgres" else None,
     )
 
