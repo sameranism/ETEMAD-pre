@@ -44,3 +44,40 @@ def test_role_endpoints_and_backend_switch_authority():
             assert client.get("/v1/ui/editor-dashboard", headers=headers(p)).status_code == 403
         assert client.get("/v1/ui/owner-dashboard", headers=headers(eic)).status_code == 403
         assert client.get("/v1/ui/saved-views", headers=headers(owner)).status_code == 403
+
+
+def test_owner_dashboard_audits_reads_and_isolates_monitor_failures(monkeypatch):
+    services = build_services(environ={"ETEMAD_SESSION_KEY": "dashboard-audit-fixture-key"})
+    owner = Principal("owner-audited-ui", "owner")
+
+    def unavailable(*_args, **_kwargs):
+        raise RuntimeError("fixture monitor unavailable")
+
+    monkeypatch.setattr(services.pipeline.poll_states, "all", unavailable)
+    if services.foreign_workflow is not None:
+        monkeypatch.setattr(services.foreign_workflow, "status", unavailable)
+    for resource_type, resource_id in (
+        ("operations", "default"),
+        ("source_registry", "default"),
+        ("foreign_monitor", "default"),
+        ("config", "output_controls:global:controls-main"),
+    ):
+        services.grants.grant(Grant(
+            owner.subject_id, owner.role, resource_type, resource_id, "read",
+        ))
+    headers = {"Authorization": "Bearer " + issue_session(owner, services.session_key)}
+    with TestClient(create_app(services=services)) as client:
+        response = client.get("/v1/ui/owner-dashboard", headers=headers)
+    assert response.status_code == 200, response.text
+    operations = response.json()["operations"]
+    assert operations["health"]
+    assert operations["controls"]["values"]["publishing"] is False
+    assert operations["sources"]["monitoring"] == {
+        "domestic": "unavailable",
+        "foreign": "unavailable",
+    }
+    audited = {(entry.resource_type, entry.resource_id, entry.action)
+               for entry in services.audit_sink.entries()}
+    assert ("operations", "default", "operations.read") in audited
+    assert ("source_registry", "default", "source_registry.read") in audited
+    assert ("config", "output_controls:global:controls-main", "config.read") in audited

@@ -17,8 +17,10 @@ export type Workbench = { role: "editor_in_chief" | "staff"; desks: string[]; it
 export type Controls = { revision: number; values: Record<string, boolean>; can_update: boolean };
 type Poll = { source_id: string; stream: string; enabled: boolean; last_success_at: string | null;
   consecutive_failures: number | null };
+type MonitorStatus = "ok" | "unavailable" | "not_authorized";
 export type OwnerData = { health?: Record<string, string>; workflow_counts?: Record<string, number> | null;
-  sources?: { registered: number; enabled: number; items: Poll[]; scan_limit: number };
+  sources?: { registered: number; enabled: number; items: Poll[]; scan_limit: number;
+    monitoring: Record<"domestic" | "foreign", MonitorStatus> };
   foreign_monitor?: boolean; schedule?: boolean; publishing?: boolean; controls?: Controls;
   ai_cost?: { committed_usd: number | null; period: string; basis: string };
   audit?: { occurred_at: string; actor_role: string; action: string; decision: string }[] };
@@ -85,7 +87,10 @@ export function parseOwner(x: unknown): OwnerData {
       v.sources.items.length > 200 || !v.sources.items.every(a => object(a) && text(a.source_id) &&
         ["domestic", "foreign"].includes(String(a.stream)) && bool(a.enabled) &&
         (a.last_success_at === null || date(a.last_success_at)) &&
-        (a.consecutive_failures === null || count(a.consecutive_failures))))) throw new Error("source health");
+        (a.consecutive_failures === null || count(a.consecutive_failures))) ||
+      !object(v.sources.monitoring) || Object.keys(v.sources.monitoring).length !== 2 ||
+      !["domestic", "foreign"].every(k => ["ok", "unavailable", "not_authorized"].includes(
+        String(((v.sources as Record<string, unknown>).monitoring as Record<string, unknown>)[k]))))) throw new Error("source health");
   if (v.ai_cost !== undefined && (!object(v.ai_cost) || !text(v.ai_cost.period) ||
       v.ai_cost.basis !== "ledger_estimate_utc_month" ||
       !(v.ai_cost.committed_usd === null || (typeof v.ai_cost.committed_usd === "number" &&

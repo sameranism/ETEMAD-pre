@@ -60,7 +60,9 @@ export function parseWorkspace(value: unknown, newsId: string): Workspace {
   return value as unknown as Workspace;
 }
 
-export default function DraftWorkspace({ token, items }: { token: string; items: readonly NewsFeedRecord[] }) {
+export default function DraftWorkspace({ token, items, onDirtyChange }: {
+  token: string; items: readonly NewsFeedRecord[]; onDirtyChange?: (dirty: boolean) => void;
+}) {
   const [selected, setSelected] = useState("");
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [fields, setFields] = useState<Fields>(blank);
@@ -76,6 +78,9 @@ export default function DraftWorkspace({ token, items }: { token: string; items:
   const retry = useRef<{ payload: string; key: string } | null>(null);
   const headers = { Authorization: "Bearer " + token, Accept: "application/json" };
   const path = "/v1/editorial/news/" + encodeURIComponent(selected) + "/draft";
+
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
 
   useEffect(() => {
     if (!selected) return;

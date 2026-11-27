@@ -1,9 +1,9 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import OwnerDashboard, { OwnerOverview } from "../src/features/owner/OwnerDashboard";
 import ExecutiveDashboard, { ExecutiveOverview } from "../src/features/executive/ExecutiveDashboard";
-import StaffDashboard, { StaffOverview } from "../src/features/staff/StaffDashboard";
+import StaffDashboard, { mayReplaceProjection, StaffOverview } from "../src/features/staff/StaffDashboard";
 import { parseExecutive, parseOwner, parseRole, parseStaff, parseViews } from "../src/features/dashboard/data";
 
 const base = { schema_version: "1.0", role: "staff", desks: ["economy"],
@@ -42,6 +42,24 @@ describe("P27 distinct role workspaces", () => {
       ai_cost: { committed_usd: null, period: "2026-11", basis: "ledger_estimate_utc_month" },
     } });
     expect(renderToStaticMarkup(createElement(OwnerOverview, { data: ops }))).toContain("داده موجود نیست");
+  });
+  it("renders explicit isolated source monitor failures", () => {
+    const ops = parseOwner({ schema_version: "1.0", role: "owner", operations: {
+      sources: { registered: 0, enabled: 0, items: [], scan_limit: 200,
+        monitoring: { domestic: "unavailable", foreign: "not_authorized" } },
+    } });
+    const rendered = renderToStaticMarkup(createElement(OwnerOverview, { data: ops }));
+    expect(rendered).toContain("پایش منابع داخلی");
+    expect(rendered).toContain("در دسترس نیست");
+    expect(rendered).toContain("خارج از مجوز");
+  });
+  it("requires confirmation before a dirty projection is replaced", () => {
+    const confirm = vi.fn(() => false);
+    expect(mayReplaceProjection(false, confirm)).toBe(true);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(mayReplaceProjection(true, confirm)).toBe(false);
+    confirm.mockReturnValue(true);
+    expect(mayReplaceProjection(true, confirm)).toBe(true);
   });
   it("rejects malformed or out-of-scope views", () => {
     expect(parseViews({ schema_version: "1.0", items: [] })).toEqual([]);

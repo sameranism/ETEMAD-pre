@@ -20,12 +20,15 @@ export function TaskQueue({ tasks, executive = false }: { tasks: Task[]; executi
         <td>{t.decision ? DECISIONS[t.decision] : "ثبت نشده"}</td></tr>)}</tbody></table></div>}
   </section>;
 }
-export default function WorkbenchPanels({ token, data }: { token: string; data: Workbench }) {
+export default function WorkbenchPanels({ token, data, onDraftDirtyChange }: {
+  token: string; data: Workbench; onDraftDirtyChange?: (dirty: boolean) => void;
+}) {
   const tasks = new Set(data.tasks.map(t => t.news_id));
   return <>
     <NewsDesk items={data.items} />
     {data.capabilities.preview && <ArticleEditor token={token} />}
-    {tasks.size > 0 && <DraftWorkspace token={token} items={data.items.filter(i => tasks.has(i.news_id))} />}
+    {tasks.size > 0 && <DraftWorkspace token={token} items={data.items.filter(i => tasks.has(i.news_id))}
+      onDirtyChange={onDraftDirtyChange} />}
     {data.capabilities.archive && <ArchiveSearch token={token} />}
     {data.capabilities.analysis && <PoliticalAnalysis token={token} />}
     {data.capabilities.reports && <DailyReports token={token} visibility="public" />}

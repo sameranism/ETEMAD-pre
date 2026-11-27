@@ -2,6 +2,10 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import WorkbenchPanels, { TaskQueue } from "../dashboard/Workbench";
 import { DESK_LABELS, STREAM_LABELS, parseStaff, parseViews, request, useResource,
   type Stream, type Workbench } from "../dashboard/data";
+
+export function mayReplaceProjection(dirty: boolean, confirmDiscard: () => boolean): boolean {
+  return !dirty || confirmDiscard();
+}
 export function StaffOverview({ data }: { data: Workbench }) {
   return <><div className="dash-kpis"><div><span>سرویس‌های مجاز</span><strong>{data.desks.length.toLocaleString("fa-IR")}</strong></div>
     <div><span>ورودی قابل مشاهده</span><strong>{data.items.length.toLocaleString("fa-IR")}</strong></div>
@@ -47,21 +51,29 @@ function Views({ token, desk, stream, desks, select }: { token: string; desk: st
 export default function StaffDashboard({ token }: { token: string }) {
   const [desk, setDesk] = useState("");
   const [stream, setStream] = useState<Stream>("all");
+  const [draftDirty, setDraftDirty] = useState(false);
   const q = useResource(token, desk ? "/v1/ui/desk/" + encodeURIComponent(desk) + "?stream=" + stream : "/v1/ui/staff-dashboard", parseStaff);
-  const select = (d: string, s: Stream) => { setDesk(d); setStream(s); };
+  const confirmDiscard = () => mayReplaceProjection(draftDirty,
+    () => window.confirm("تغییرات ذخیره نشده کنار گذاشته شود؟"));
+  const select = (d: string, s: Stream) => {
+    if (!confirmDiscard()) return;
+    setDesk(d); setStream(s);
+  };
   return <div className="role-dashboard staff-dashboard">
     <header className="dash-header"><div><p className="eyebrow">میز کار · تحریریه</p><h1>داشبورد کارکنان</h1>
-      <p>ورودی، کارهای واگذارشده و وضعیت بررسی در سرویس‌های مجاز</p></div><button type="button" onClick={q.refresh}>به‌روزرسانی</button></header>
+      <p>ورودی، کارهای واگذارشده و وضعیت بررسی در سرویس‌های مجاز</p></div><button type="button"
+        onClick={() => { if (confirmDiscard()) q.refresh(); }}>به‌روزرسانی</button></header>
     {q.loading && <p role="status">در حال دریافت میز کار…</p>}
     {q.error !== null && <p role="alert">داده یا مجوز میز کار در دسترس نیست. <button type="button" onClick={() => select("", "all")}>بازگشت به سرویس‌های مجاز</button></p>}
     {q.data && <>
       <div className="dash-filter"><label>سرویس <select value={desk} onChange={e => select(e.target.value, "all")}>
         <option value="">همه سرویس‌های مجاز</option>{q.data.desks.map(d => <option key={d} value={d}>{DESK_LABELS[d]}</option>)}
-      </select></label><label>جریان <select disabled={!desk} value={stream} onChange={e => setStream(e.target.value as Stream)}>
+      </select></label><label>جریان <select disabled={!desk} value={stream}
+        onChange={e => select(desk, e.target.value as Stream)}>
         {Object.entries(STREAM_LABELS).map(([s, label]) => <option key={s} value={s}>{label}</option>)}</select></label></div>
       <StaffOverview data={q.data} />
       <Views token={token} desk={desk} stream={stream} desks={q.data.desks} select={select} />
-      <WorkbenchPanels token={token} data={q.data} />
+      <WorkbenchPanels token={token} data={q.data} onDraftDirtyChange={setDraftDirty} />
     </>}
   </div>;
 }
