@@ -68,7 +68,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 20
+            assert len(central_tables) == 21
+            assert ("insights", "chat_memory") in central_tables
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
@@ -77,13 +78,13 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish",
+                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish"} and row != ("identity", "login_throttle")
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights"} and row != ("identity", "login_throttle")
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -890,6 +891,39 @@ def _exercise_analysis_workspace():
             assert "SECRET-DENIED" not in str(chat)
             assert client.post("/v1/analysis/chat", headers=headers,
                                json={**payload, "classification": "executive_private"}).status_code == 400
+            memory_path = "/v1/analysis/chat/memory"
+            assert client.get(memory_path).status_code == 401
+            assert client.get(memory_path, headers=headers).json()["memory"] is None
+            memory_input = {"topic": "Atlas", "days": 7, "stream": "foreign"}
+            assert client.put(memory_path, headers=headers,
+                              json={**memory_input, "subject_id": "another"}).status_code == 400
+            saved = client.put(memory_path, headers=headers, json=memory_input)
+            assert saved.status_code == 200 and saved.headers["Cache-Control"] == "no-store"
+            assert saved.json()["memory"]["topic"] == "Atlas"
+            from backend.modules.intelligence.chat_memory import PostgresChatMemory
+
+            restarted = DatabaseRegistry()
+            try:
+                restored = PostgresChatMemory(restarted.engine("central")).get(principal)
+                assert restored is not None and restored.topic == "Atlas"
+                assert PostgresChatMemory(restarted.engine("central")).get(
+                    Principal(principal.subject_id, "editor_in_chief")) is None
+            finally:
+                restarted.dispose()
+            another = Principal("fixture-memory-other", "staff")
+            other_headers = {"Authorization": "Bearer " + issue_session(another, services.session_key)}
+            assert client.get(memory_path, headers=other_headers).status_code == 403
+            services.grants.grant(Grant(another.subject_id, "staff", "analysis_workspace", "default", "chat"))
+            services.grants.grant(Grant(another.subject_id, "staff", "archive", "default", "search"))
+            assert client.get(memory_path, headers=other_headers).json()["memory"] is None
+            assert client.delete(memory_path, headers=other_headers).status_code == 200
+            assert client.get(memory_path, headers=headers).json()["memory"]["topic"] == "Atlas"
+            chat_grant = Grant(principal.subject_id, "staff", "analysis_workspace", "default", "chat")
+            services.grants.revoke(chat_grant)
+            assert client.get(memory_path, headers=headers).status_code == 403
+            assert client.delete(memory_path, headers=headers).status_code == 200
+            services.grants.grant(chat_grant)
+            assert client.get(memory_path, headers=headers).json()["memory"] is None
             from backend.core.output_switches import OutputSwitches, default_off_switches
 
             report_path = "/v1/analysis/reports/2"

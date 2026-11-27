@@ -20,6 +20,7 @@ from backend.core.permissions import decide_access
 from backend.core.sources_service import SourceNotAllowed, SourceNotFound
 from backend.modules.intelligence.analysis import analyze
 from backend.modules.intelligence.chat import answer_question
+from backend.modules.intelligence.chat_memory import PostgresChatMemory
 from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
 from backend.modules.intelligence.public_reports import PUBLIC_SLOTS, build_public_report
 from backend.modules.intelligence.retrieval import retrieve
@@ -32,6 +33,13 @@ class EvidenceInput(BaseModel):
     period_end: datetime
     stream: Literal["domestic", "foreign", "manual"] | None = None
     limit: int = Field(default=12, ge=1, le=20)
+
+
+class MemoryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    topic: str = Field(min_length=1, max_length=500)
+    days: Literal[1, 7, 30]
+    stream: Literal["all", "domestic", "foreign"]
 
 
 def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..., Any],
@@ -116,6 +124,54 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "mode": "extractive", "result": answer_question(payload.query, bundle),
                 "evidence": [item.reference() for item in bundle.evidence], "bounded": bundle.bounded}
+
+    def memory_store(services: Services) -> PostgresChatMemory:
+        if services.chat_memory is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        return services.chat_memory
+
+    def authorize_memory(request: Request, principal: Principal, services: Services) -> None:
+        corr = correlation_id(request)
+        authorize(services, principal, resource_type="analysis_workspace", resource_id="default",
+                  action="chat", correlation_id=corr)
+        authorize(services, principal, resource_type="archive", resource_id="default",
+                  action="search", correlation_id=corr)
+
+    @router.get("/chat/memory")
+    def read_memory(request: Request, response: Response,
+                    principal: Principal = Depends(principal_dep),
+                    services: Services = Depends(services_dep)) -> dict[str, Any]:
+        authorize_memory(request, principal, services)
+        item = memory_store(services).get(principal)
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "memory": item.as_record() if item else None}
+
+    @router.put("/chat/memory")
+    def save_memory(payload: MemoryInput, request: Request, response: Response,
+                    principal: Principal = Depends(principal_dep),
+                    services: Services = Depends(services_dep)) -> dict[str, Any]:
+        authorize_memory(request, principal, services)
+        try:
+            item = memory_store(services).save(principal, topic=payload.topic,
+                                               days=payload.days, stream=payload.stream)
+        except ValueError:
+            raise APIError(ErrorCode.CONTRACT_INVALID) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "memory": item.as_record()}
+
+    @router.delete("/chat/memory")
+    def clear_memory(request: Request, response: Response,
+                     principal: Principal = Depends(principal_dep),
+                     services: Services = Depends(services_dep)) -> dict[str, Any]:
+        # A revoked chat grant must not prevent self-deletion. The subject
+        # comes only from the authenticated principal, never from input.
+        services.auditor.record(action="chat_memory.clear", actor_id=principal.subject_id,
+                                actor_role=principal.role, resource_type="chat_memory",
+                                resource_id="self", decision="self_delete",
+                                correlation_id=correlation_id(request))
+        memory_store(services).clear(principal)
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "memory": None}
 
     @router.post("/reports/{slot}")
     def report(slot: int, payload: EvidenceInput, request: Request, response: Response,
