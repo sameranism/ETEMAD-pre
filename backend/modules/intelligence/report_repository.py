@@ -12,14 +12,27 @@ from backend.core.contracts import validate_payload
 from backend.core.permissions import GrantLookup, decide_access
 from backend.modules.intelligence.private_reports import PRIVATE_SLOTS
 from backend.modules.intelligence.public_reports import PUBLIC_SLOTS
+from backend.modules.intelligence.repository import (
+    ExecutiveReportStore,
+    ExecutiveStorageUnavailable,
+)
 
 
 class ReportRepository:
-    def __init__(self, engine: Engine, grants: GrantLookup) -> None:
+    def __init__(self, engine: Engine, grants: GrantLookup, *, private: ExecutiveReportStore | None = None) -> None:
         if engine.dialect.name != "postgresql":
             raise ValueError("reports require PostgreSQL")
         self._engine = engine
         self._grants = grants
+        self._private = private
+
+    @property
+    def private_available(self) -> bool:
+        return self._private is not None
+
+    def close(self) -> None:
+        if self._private is not None:
+            self._private.close()
 
     def _table(self, principal: Principal, slot: int) -> tuple[str, str, str]:
         if slot in PUBLIC_SLOTS:
@@ -31,7 +44,7 @@ class ReportRepository:
             if decide_access(principal.subject_id, principal.role, "private_report", f"slot-{slot}",
                              "read", self._grants, classification="executive_private")["allowed"] is not True:
                 raise PermissionError("report unavailable")
-            return "insights.executive_reports", "private_report", PRIVATE_SLOTS[slot][0]
+            return "executive.private_reports", "private_report", PRIVATE_SLOTS[slot][0]
         raise ValueError("invalid report slot")
 
     def save(self, principal: Principal, slot: int, report: Mapping[str, Any],
@@ -43,6 +56,10 @@ class ReportRepository:
                 or set(report["source_refs"]) != refs or len(refs) != len(evidence)
                 or any(not set(s["source_refs"]) <= refs for s in report["sections"])):
             raise ValueError("report/evidence mismatch")
+        if contract == "private_report":
+            if self._private is None:
+                raise ExecutiveStorageUnavailable("private report store unavailable")
+            return self._private.save(principal.subject_id, slot, report, evidence)
         with self._engine.begin() as conn:
             conn.execute(text(f"""
                 INSERT INTO {table} (subject_id,report_id,slot,payload,evidence)
@@ -63,6 +80,13 @@ class ReportRepository:
 
     def latest(self, principal: Principal, slot: int) -> dict[str, Any] | None:
         table, contract, kind = self._table(principal, slot)
+        if contract == "private_report":
+            if self._private is None:
+                raise ExecutiveStorageUnavailable("private report store unavailable")
+            saved = self._private.latest(principal.subject_id, slot)
+            if saved is not None and saved["payload"]["report_type"] != kind:
+                raise ValueError("private report slot mismatch")
+            return saved
         with self._engine.connect() as conn:
             row = conn.execute(text(f"""
                 SELECT payload,evidence FROM {table} WHERE subject_id=:subject AND slot=:slot
