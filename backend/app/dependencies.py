@@ -19,6 +19,7 @@ from typing import Callable, Mapping
 from fastapi import Request
 from sqlalchemy.engine import make_url
 
+from backend.app.editorial_runtime import build_editorial_runtime
 from backend.app.foreign_workflow import ForeignWorkflow, build_foreign_fixture_workflow
 from backend.app.pipeline import IngestPipeline
 from backend.core.archive import InMemoryArchiveStore, PostgresNewsArchive
@@ -36,7 +37,8 @@ from backend.core.settings_service import (
     DOMESTIC_INGEST_CONFIG_ID,
     DOMESTIC_INGEST_SCOPE,
     InMemoryRevisionStore,
-    PostgresIngestScheduleStore,
+    PostgresRevisionStore,
+    RevisionStore,
     SettingsService,
 )
 from backend.core.sources_service import PostgresSourceService, SourceService
@@ -58,7 +60,9 @@ from backend.modules.editorial.generation import EditorialGenerator
 from backend.modules.editorial.image_repository import ImageRepository
 from backend.modules.editorial.repository import EditorialRepository
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
+from backend.modules.intelligence.report_repository import ReportRepository
 from backend.modules.processing.repository import PostgresProcessingRepository, ProcessingRepository
+from backend.modules.publishing.repository import PostgresFixtureLedger
 
 _LOG = logging.getLogger(__name__)
 
@@ -87,6 +91,8 @@ class Services:
     images: ImageRepository | None = None
     news_archive: PostgresNewsArchive | None = None
     chat_memory: PostgresChatMemory | None = None
+    reports: ReportRepository | None = None
+    publication_ledger: PostgresFixtureLedger | None = None
     orchestrator: Orchestrator = field(init=False)
 
     def run_domestic_schedule(self, *, worker_id: str, limit: int = 10) -> list[PollResult]:
@@ -178,11 +184,11 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     schedule_storage = environ.get("ETEMAD_SCHEDULE_STORAGE", "fixture")
     if schedule_storage not in {"fixture", "postgres"}:
         raise ValueError("invalid ETEMAD_SCHEDULE_STORAGE")
-    revision_store: InMemoryRevisionStore
+    revision_store: RevisionStore
     if schedule_storage == "postgres":
         if source_storage != "postgres":
             raise ValueError("persistent schedule requires private PostgreSQL source registry")
-        revision_store = PostgresIngestScheduleStore(registry)
+        revision_store = PostgresRevisionStore(registry)
     else:
         revision_store = InMemoryRevisionStore()
     settings = SettingsService(revision_store, grant_store, credential_ref_check=lambda ref: bool(ref))
@@ -195,11 +201,9 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     news_archive = PostgresNewsArchive(registry.engine("central"), objects) if storage == "postgres" else None
 
     def switches() -> OutputSwitches:
-        stored = settings.get_latest("output_controls", "controls-main", "global")
-        if stored is None:
-            return default_off_switches()
         try:
-            return OutputSwitches.from_record(stored.value)
+            stored = settings.get_latest("output_controls", "controls-main", "global")
+            return default_off_switches() if stored is None else OutputSwitches.from_record(stored.value)
         except Exception:  # noqa: BLE001 - a broken config must not enable outputs
             _LOG.error("stored output_controls is invalid; falling back to all-off")
             return default_off_switches()
@@ -248,6 +252,11 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
             registry.engine("foreign"), registry.engine("central"), sources, pipeline,
         )
 
+    generator = build_editorial_runtime(
+        environ, registry.engine("central") if storage == "postgres" else None,
+        private_identity=accounts is not None, persistent_sources=source_storage == "postgres",
+    )
+
     return Services(
         registry=registry,
         session_key=session_key,
@@ -267,8 +276,11 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         accounts=accounts,
         foreign_workflow=foreign_workflow,
         news_archive=news_archive,
+        publication_ledger=PostgresFixtureLedger(registry.engine("central")) if storage == "postgres" else None,
+        reports=ReportRepository(registry.engine("central"), grant_store) if storage == "postgres" else None,
         chat_memory=PostgresChatMemory(registry.engine("central")) if storage == "postgres" else None,
         images=ImageRepository(registry.engine("central"), objects) if storage == "postgres" else None,
+        editorial_generator=generator,
         editorial=EditorialRepository(registry.engine("central")) if storage == "postgres" else None,
     )
 

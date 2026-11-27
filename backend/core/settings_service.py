@@ -21,6 +21,7 @@ from sqlalchemy.engine import Connection, Engine
 from backend.core.contracts import ContractError, validate_payload
 from backend.core.db import DatabaseRegistry
 from backend.core.permissions import GrantLookup, decide_access, require_access
+from backend.core.secrets import validate_ref
 
 _SUPPORTED = frozenset(
     {"output_controls", "schedule_config", "ai_models_config", "news_framework"}
@@ -138,74 +139,86 @@ def _validate_ingest_schedule(value: Mapping[str, Any]) -> None:
         raise ValueError("invalid schedule timezone") from exc
 
 
-class PostgresIngestScheduleStore(InMemoryRevisionStore):
-    """Durable P02 ingestion schedule only; other settings retain fixture behavior.
+class PostgresRevisionStore:
+    """P02: authoritative immutable revisions for all supported settings.
 
-    Each append-only revision records actor and time in the same row, providing
-    its durable audit record without a second, non-atomic write. No output
-    switches, credentials or other configuration are persisted by this slice.
+    Reuse the existing control.config_revisions table and its audit metadata.
+    Keep the original table's (config_id, scope, version_no) identity: a key
+    cannot be reassigned to another contract. No credential values are stored.
     """
 
     def __init__(self, registry: DatabaseRegistry) -> None:
-        super().__init__()
         self._registry = registry
 
     def _engine(self) -> Engine:
         engine = self._registry.engine("central")
         if engine.dialect.name != "postgresql":
-            raise ValueError("schedule persistence requires PostgreSQL")
+            raise ValueError("settings persistence requires PostgreSQL")
         return engine
 
     @staticmethod
-    def _is_ingest(contract_name: str, config_id: str, scope: str) -> bool:
-        return (contract_name, config_id, scope) == (
-            "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
-        )
+    def _check_key(contract_name: str, config_id: str, scope: str) -> None:
+        if (contract_name not in _SUPPORTED or not 1 <= len(config_id) <= 64
+                or not 1 <= len(scope) <= 32):
+            raise ValueError("invalid persistent configuration key")
 
     @staticmethod
-    def _latest(conn: Connection) -> ConfigRevision | None:
+    def _latest(conn: Connection, contract_name: str, config_id: str,
+                scope: str) -> ConfigRevision | None:
         row = conn.execute(text("""
-            SELECT version_no, value_json, changed_by
+            SELECT version_no, value_json, changed_by, contract_name
             FROM control.config_revisions
-            WHERE config_id = :id AND scope = :scope AND contract_name = 'schedule_config'
+            WHERE config_id = :id AND scope = :scope
             ORDER BY version_no DESC LIMIT 1
-        """), {"id": DOMESTIC_INGEST_CONFIG_ID, "scope": DOMESTIC_INGEST_SCOPE}).mappings().one_or_none()
-        if row is None:
+        """), {"id": config_id, "scope": scope}).mappings().one_or_none()
+        if row is None or row["contract_name"] != contract_name:
             return None
-        return ConfigRevision(
-            "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
-            row["version_no"], deepcopy(row["value_json"]), row["changed_by"],
-        )
+        validate_payload(contract_name, row["value_json"])
+        return ConfigRevision(contract_name, config_id, scope, row["version_no"],
+                              deepcopy(row["value_json"]), row["changed_by"])
 
     def get(self, contract_name: str, config_id: str, scope: str) -> ConfigRevision | None:
-        if not self._is_ingest(contract_name, config_id, scope):
-            return super().get(contract_name, config_id, scope)
+        self._check_key(contract_name, config_id, scope)
         with self._engine().connect() as conn:
-            return self._latest(conn)
+            return self._latest(conn, contract_name, config_id, scope)
 
     def compare_and_append(
         self, *, contract_name: str, config_id: str, scope: str,
         expected_revision: int, value: Mapping[str, Any], actor_id: str,
     ) -> ConfigRevision:
-        if not self._is_ingest(contract_name, config_id, scope):
-            return super().compare_and_append(
-                contract_name=contract_name, config_id=config_id, scope=scope,
-                expected_revision=expected_revision, value=value, actor_id=actor_id,
-            )
-        _validate_ingest_schedule(value)
+        self._check_key(contract_name, config_id, scope)
+        if not 1 <= len(actor_id) <= 64 or type(expected_revision) is not int or expected_revision < 0:
+            raise ValueError("invalid persistent configuration revision")
+        validate_payload(contract_name, value)
+        if config_id == DOMESTIC_INGEST_CONFIG_ID:
+            if contract_name != "schedule_config" or scope != DOMESTIC_INGEST_SCOPE:
+                raise ValueError("invalid domestic schedule scope")
+            _validate_ingest_schedule(value)
+        if contract_name == "ai_models_config":
+            for task in value["tasks"]:
+                validate_ref(task["credential_ref"])
+        if contract_name == "output_controls" and (
+                value["revision"] != expected_revision + 1 or value["updated_by"] != actor_id):
+            raise ValueError("invalid output control revision")
         with self._engine().begin() as conn:
+            # Preserve the existing serialization strategy and PK, including
+            # competing first revisions using different contract names.
             conn.execute(text("LOCK TABLE control.config_revisions IN SHARE ROW EXCLUSIVE MODE"))
-            latest = self._latest(conn)
-            current = latest.revision if latest is not None else 0
-            if current != expected_revision:
+            latest = self._latest(conn, contract_name, config_id, scope)
+            if latest is None and conn.execute(text("""
+                SELECT EXISTS(SELECT 1 FROM control.config_revisions
+                WHERE config_id=:id AND scope=:scope)
+            """), {"id": config_id, "scope": scope}).scalar_one():
                 raise RevisionConflict
-            revision = current + 1
+            if (latest.revision if latest else 0) != expected_revision:
+                raise RevisionConflict
+            revision = expected_revision + 1
             conn.execute(text("""
                 INSERT INTO control.config_revisions
                     (config_id, version_no, scope, contract_name, value_json, changed_by, effective_at)
-                VALUES (:id, :rev, :scope, 'schedule_config', CAST(:value AS json), :actor, now())
+                VALUES (:id, :rev, :scope, :contract, CAST(:value AS json), :actor, now())
             """), {
-                "id": config_id, "rev": revision, "scope": scope,
+                "id": config_id, "rev": revision, "scope": scope, "contract": contract_name,
                 "value": json.dumps(dict(value), ensure_ascii=False, allow_nan=False),
                 "actor": actor_id,
             })
@@ -214,18 +227,17 @@ class PostgresIngestScheduleStore(InMemoryRevisionStore):
     def audit_entries(self) -> tuple[ConfigAudit, ...]:
         with self._engine().connect() as conn:
             rows = conn.execute(text("""
-                SELECT version_no, changed_by, effective_at
-                FROM control.config_revisions
-                WHERE config_id = :id AND scope = :scope AND contract_name = 'schedule_config'
-                ORDER BY version_no
-            """), {"id": DOMESTIC_INGEST_CONFIG_ID, "scope": DOMESTIC_INGEST_SCOPE}).mappings().all()
-        return super().audit_entries() + tuple(
-            ConfigAudit(
-                "schedule_config", DOMESTIC_INGEST_CONFIG_ID, DOMESTIC_INGEST_SCOPE,
-                row["version_no"], row["changed_by"], row["effective_at"].isoformat(),
-            )
-            for row in rows
-        )
+                SELECT config_id,scope,contract_name,version_no,changed_by,effective_at
+                FROM control.config_revisions ORDER BY effective_at,config_id,scope,version_no
+            """)).mappings().all()
+        return tuple(ConfigAudit(row["contract_name"], row["config_id"], row["scope"],
+                                 row["version_no"], row["changed_by"], row["effective_at"].isoformat())
+                     for row in rows)
+
+
+# Compatibility for existing imports; the selected PostgreSQL store no longer
+# falls back to process-local state for output controls or other settings.
+PostgresIngestScheduleStore = PostgresRevisionStore
 
 
 CredentialRefCheck = Callable[[str], bool]

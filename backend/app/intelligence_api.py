@@ -28,6 +28,7 @@ from backend.modules.intelligence.assistant import (
 from backend.modules.intelligence.chat import answer_question
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
 from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
+from backend.modules.intelligence.private_reports import PRIVATE_SLOTS, build_private_report
 from backend.modules.intelligence.public_reports import PUBLIC_SLOTS, build_public_report
 from backend.modules.intelligence.retrieval import retrieve
 
@@ -48,6 +49,12 @@ class AssistantInput(BaseModel):
     report_slot: int | None = Field(default=None, ge=1, le=4, strict=True)
 
 
+class DailyReportInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    period_start: datetime
+    period_end: datetime
+
+
 class MemoryInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     topic: str = Field(min_length=1, max_length=500)
@@ -60,7 +67,7 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
     router = APIRouter(prefix="/analysis", tags=["analysis"])
 
     def bundle_for(payload: EvidenceInput, request: Request, principal: Principal,
-                   services: Services, action: str) -> EvidenceBundle:
+                   services: Services, action: str, *, all_news: bool = False) -> EvidenceBundle:
         corr = correlation_id(request)
         authorize(services, principal, resource_type="analysis_workspace", resource_id="default",
                   action=action, correlation_id=corr)
@@ -101,8 +108,21 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
             return Evidence.from_raw(raw, latest["artifact_id"], latest["sha256"], allowed_scope=scope)
 
         try:
-            result = retrieve(payload.query, period, candidates=candidates, authorized=scope_for,
-                              load=load, limit=payload.limit, bounded=True)
+            if all_news:
+                selected: list[Evidence] = []
+                for candidate in candidates:
+                    scope = scope_for(candidate)
+                    if scope is None:
+                        continue
+                    item = load(candidate, scope)
+                    if item is not None and period.start <= item.collected_at < period.end:
+                        selected.append(item)
+                    if len(selected) >= payload.limit:
+                        break
+                result = EvidenceBundle(period, tuple(selected), True)
+            else:
+                result = retrieve(payload.query, period, candidates=candidates, authorized=scope_for,
+                                  load=load, limit=payload.limit, bounded=True)
         except ArchiveIntegrityError:
             raise APIError(ErrorCode.INVALID_STATE) from None
         except ValueError:
@@ -248,5 +268,94 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
             handler = {"research": chat, "analysis": run}[action]
             result = handler(payload.evidence, request, response, principal, services)
         return {**result, "assistant_action": action}
+
+    def report_access(slot: int, request: Request, principal: Principal, services: Services) -> None:
+        corr = correlation_id(request)
+        if slot in PRIVATE_SLOTS:
+            authorize(services, principal, resource_type="private_report", resource_id=f"slot-{slot}",
+                      action="read", correlation_id=corr)
+        elif slot not in PUBLIC_SLOTS:
+            raise APIError(ErrorCode.NOT_FOUND)
+        authorize(services, principal, resource_type="analysis_workspace", resource_id="default",
+                  action="report", correlation_id=corr)
+        authorize(services, principal, resource_type="archive", resource_id="default",
+                  action="search", correlation_id=corr)
+
+    @router.get("/daily-reports")
+    def daily_slots(response: Response, request: Request,
+                    principal: Principal = Depends(principal_dep),
+                    services: Services = Depends(services_dep)) -> dict[str, Any]:
+        authorize(services, principal, resource_type="analysis_workspace", resource_id="default",
+                  action="report", correlation_id=correlation_id(request))
+        slots = [{"slot": i, "title": title, "private": False,
+                  "generation_enabled": services.switches().enabled(PUBLIC_ANALYSIS)}
+                 for i, (_, title) in PUBLIC_SLOTS.items()]
+        slots += [{"slot": i, "title": title, "private": True, "generation_enabled": True}
+                  for i, (_, title) in PRIVATE_SLOTS.items()
+                  if decide_access(principal.subject_id, principal.role, "private_report", f"slot-{i}",
+                                   "read", services.grants, classification="executive_private")["allowed"] is True]
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "slots": slots}
+
+    @router.post("/daily-reports/{slot}")
+    def generate_daily(slot: int, payload: DailyReportInput, request: Request, response: Response,
+                       principal: Principal = Depends(principal_dep),
+                       services: Services = Depends(services_dep)) -> dict[str, Any]:
+        report_access(slot, request, principal, services)
+        if services.reports is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        if slot in PUBLIC_SLOTS and not services.switches().enabled(PUBLIC_ANALYSIS):
+            raise APIError(ErrorCode.INVALID_STATE)
+        scoped = EvidenceInput(query="daily", period_start=payload.period_start, period_end=payload.period_end,
+                               stream="domestic" if slot == 1 else "foreign" if slot == 2 else None, limit=20)
+        bundle = bundle_for(scoped, request, principal, services, "report", all_news=True)
+        try:
+            if slot in PRIVATE_SLOTS:
+                result = build_private_report(slot, bundle, principal=principal, grants=services.grants)
+            else:
+                result = build_public_report(slot, bundle, switches=services.switches())
+            if result is None and slot in PUBLIC_SLOTS and not services.switches().enabled(PUBLIC_ANALYSIS):
+                raise APIError(ErrorCode.INVALID_STATE)
+            evidence = [item.reference() for item in bundle.evidence
+                        if result is not None and item.artifact_id in result["source_refs"]]
+            report_access(slot, request, principal, services)
+            saved = services.reports.save(principal, slot, result, evidence) if result is not None else None
+        except PermissionError:
+            raise APIError(ErrorCode.NOT_FOUND) from None
+        except ValueError:
+            raise APIError(ErrorCode.INVALID_STATE) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "slot": slot, "mode": "bounded_daily_draft",
+                "saved": saved, "bounded": True}
+
+    @router.get("/daily-reports/{slot}")
+    def read_daily(slot: int, request: Request, response: Response,
+                   principal: Principal = Depends(principal_dep),
+                   services: Services = Depends(services_dep)) -> dict[str, Any]:
+        report_access(slot, request, principal, services)
+        if services.reports is None or services.news_archive is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        try:
+            saved = services.reports.latest(principal, slot)
+            if saved is not None:
+                # The stored report contains metadata only. Every underlying
+                # source and archive reference must still be readable now.
+                for item in saved["evidence"]:
+                    for kind in ("archive", "newsroom"):
+                        authorize(services, principal, resource_type=kind, resource_id=item["news_id"],
+                                  action="read", correlation_id=correlation_id(request))
+                    source = services.sources.require_usable(item["source_id"], stream=item["stream"])
+                    versions = services.news_archive.versions(item["news_id"])
+                    if not any(v["artifact_id"] == item["source_ref"] and v["sha256"] == item["sha256"]
+                               for v in versions) or source["license_scope"] not in {"metadata", "summary", "full_text"}:
+                        raise APIError(ErrorCode.FORBIDDEN)
+                report_access(slot, request, principal, services)
+        except (PermissionError, SourceNotAllowed, SourceNotFound):
+            raise APIError(ErrorCode.NOT_FOUND) from None
+        except ValueError:
+            raise APIError(ErrorCode.INVALID_STATE) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "slot": slot, "mode": "bounded_daily_draft",
+                "saved": saved, "bounded": True}
 
     return router

@@ -68,7 +68,9 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 21
+            assert len(central_tables) == 24
+            assert {("insights", "public_report_drafts"), ("insights", "executive_reports")} <= central_tables
+            assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
@@ -84,7 +86,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights"} and row != ("identity", "login_throttle")
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -109,6 +111,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert tables("domestic") == domestic_tables
             assert tables("central") == central_tables
             assert tables("foreign") == set()
+            _exercise_durable_settings()
             _exercise_domestic_identity(domestic)
             _exercise_processing_history(central)
             _exercise_source_registry(central)
@@ -129,14 +132,83 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_foreign_dashboard()
             _exercise_archive_workspace(central)
             _exercise_image_workspace(central)
-            _exercise_analysis_workspace()
+            _exercise_analysis_workspace(central)
             _exercise_publication_queue(central)
+            _exercise_ai_cost_ledger()
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
         finally:
             for database in reversed(created):
                 control.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+
+
+def _exercise_durable_settings():
+    import json
+
+    from backend.core.output_switches import default_off_switches
+    from backend.core.settings_service import PostgresRevisionStore, RevisionConflict
+
+    registry = DatabaseRegistry()
+    second = DatabaseRegistry()
+    store = PostgresRevisionStore(registry)
+    actor = "fixture-settings-owner"
+    examples = BACKEND.parent / "source" / "contracts" / "examples"
+    configs = [
+        ("output_controls", "controls-main", "global", {
+            **default_off_switches().record, "updated_by": actor,
+        }),
+        ("schedule_config", "SCH-FOREIGN", "foreign", json.loads(
+            (examples / "schedule_config.example.json").read_text())),
+        ("ai_models_config", "MODELS-01", "global", json.loads(
+            (examples / "ai_models_config.example.json").read_text())),
+        ("news_framework", "FW-01", "foreign", json.loads(
+            (examples / "news_framework.example.json").read_text())),
+    ]
+    try:
+        for contract, identity, scope, value in configs:
+            record = store.compare_and_append(contract_name=contract, config_id=identity,
+                scope=scope, value=value, actor_id=actor, expected_revision=0)
+            assert record.revision == 1
+        registry.dispose()
+        restarted = PostgresRevisionStore(second)
+        for contract, identity, scope, value in configs:
+            record = restarted.get(contract, identity, scope)
+            assert record is not None and record.value == value and record.updated_by == actor
+        assert len([a for a in restarted.audit_entries() if a.actor_id == actor]) == 4
+        controls = configs[0][3]
+        with pytest.raises(RevisionConflict):
+            restarted.compare_and_append(contract_name="output_controls", config_id="controls-main",
+                scope="global", value=controls, actor_id=actor, expected_revision=0)
+        changed = {**controls, "revision": 2, "publishing": {**controls["publishing"], "enabled": True}}
+        def update():
+            try:
+                restarted.compare_and_append(contract_name="output_controls", config_id="controls-main",
+                    scope="global", value=changed, actor_id=actor, expected_revision=1)
+                return True
+            except RevisionConflict:
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sorted(pool.map(lambda _: update(), range(2))) == [False, True]
+        assert restarted.get("output_controls", "controls-main", "global").value == changed
+        # The integration suite uses a default-off runtime after this exercise.
+        restarted.compare_and_append(contract_name="output_controls", config_id="controls-main",
+            scope="global", value={**controls, "revision": 3}, actor_id=actor, expected_revision=2)
+        with pytest.raises(RevisionConflict):
+            restarted.compare_and_append(contract_name="output_controls", config_id="MODELS-01",
+                scope="global", value=controls, actor_id=actor, expected_revision=0)
+        assert restarted.get("output_controls", "MODELS-01", "global") is None
+        invalid = deepcopy(configs[2][3])
+        invalid["tasks"][0]["credential_ref"] = "not-a-reference"
+        with pytest.raises(ValueError):
+            restarted.compare_and_append(contract_name="ai_models_config", config_id="MODELS-01",
+                scope="global", value=invalid, actor_id=actor, expected_revision=1)
+        # Clear only synthetic settings from the disposable integration database.
+        with second.engine("central").begin() as conn:
+            conn.execute(text("DELETE FROM control.config_revisions WHERE changed_by=:actor"), {"actor": actor})
+    finally:
+        registry.dispose()
+        second.dispose()
 
 
 def _exercise_processing_history(central):
@@ -836,7 +908,7 @@ def _exercise_image_workspace(central):
     finally:
         services.registry.dispose()
 
-def _exercise_analysis_workspace():
+def _exercise_analysis_workspace(central):
     from fastapi.testclient import TestClient
 
     from backend.app.dependencies import build_services
@@ -943,6 +1015,53 @@ def _exercise_analysis_workspace():
             assert "SECRET-DENIED" not in report_response.text
             assert client.post("/v1/analysis/reports/5", headers=headers, json=payload).status_code == 404
             assert client.post("/v1/analysis/reports/1", headers=headers, json=payload).status_code == 400
+            daily = "/v1/analysis/daily-reports"
+            daily_input = {k: payload[k] for k in ("period_start", "period_end")}
+            assert [v["slot"] for v in client.get(daily, headers=headers).json()["slots"]] == [1, 2, 3, 4]
+            domestic_source = {**source, "source_id": "SRC-ANALYSIS-DOMESTIC",
+                               "stream": "domestic", "country": "IR"}
+            services.sources.register(domestic_source)
+            domestic = {**raw, "news_id": "NEWS-ANALYSIS-DOMESTIC", "source_id": domestic_source["source_id"],
+                        "stream": "domestic", "source_country": "IR", "language": "fa",
+                        "original_title": "خبر آزمایشی داخلی",
+                        "original_url": "https://example.invalid/analysis/domestic"}
+            services.pipeline.process(domestic)
+            for resource in ("archive", "newsroom"):
+                services.grants.grant(Grant(principal.subject_id, "staff", resource, domestic["news_id"], "read"))
+            for slot in (1, 2, 3, 4):
+                created = client.post(f"{daily}/{slot}", headers=headers, json=daily_input)
+                assert created.status_code == 200 and created.json()["saved"]["payload"]["visibility"] == "public"
+                latest = client.get(f"{daily}/{slot}", headers=headers)
+                assert latest.json()["saved"] == created.json()["saved"]
+                assert "SECRET-DENIED" not in latest.text
+            assert client.get(daily + "/5", headers=headers).status_code == 404
+            eic = Principal("fixture-daily-eic", "editor_in_chief")
+            eic_headers = {"Authorization": "Bearer " + issue_session(eic, services.session_key)}
+            services.grants.grant(Grant(eic.subject_id, eic.role, "analysis_workspace", "default", "report"))
+            services.grants.grant(Grant(eic.subject_id, eic.role, "archive", "default", "search"))
+            for item in (raw, domestic):
+                for resource in ("archive", "newsroom"):
+                    services.grants.grant(Grant(eic.subject_id, eic.role, resource, item["news_id"], "read"))
+            for slot in (5, 6, 7):
+                services.grants.grant(Grant(eic.subject_id, eic.role, "private_report", f"slot-{slot}", "read"))
+            services.switches = lambda: off
+            for slot in (5, 6, 7):
+                created = client.post(f"{daily}/{slot}", headers=eic_headers, json=daily_input)
+                assert created.status_code == 200 and created.json()["saved"]["payload"]["publishable"] is False
+                assert client.get(f"{daily}/{slot}", headers=eic_headers).json()["saved"] == created.json()["saved"]
+                assert client.get(f"{daily}/{slot}", headers=headers).status_code == 404
+            services.grants.revoke(Grant(eic.subject_id, eic.role, "private_report", "slot-5", "read"))
+            assert client.get(daily + "/5", headers=eic_headers).status_code == 404
+            from alembic import command
+            with pytest.raises(DBAPIError, match="report history is not empty"):
+                command.downgrade(central, "012_ai_cost_ledger")
+            # Remove only this disposable test's report fixtures so the
+            # independent older publication downgrade check can run.
+            with services.registry.engine("central").begin() as conn:
+                conn.execute(text("DELETE FROM insights.public_report_drafts WHERE subject_id=:id"),
+                             {"id": principal.subject_id})
+                conn.execute(text("DELETE FROM insights.executive_reports WHERE subject_id=:id"),
+                             {"id": eic.subject_id})
             services.switches = lambda: off
             assert client.post(report_path, headers=headers, json=payload).status_code == 422
             services.sources.register({**source, "license_scope": "metadata"})
@@ -1020,6 +1139,53 @@ def _exercise_publication_queue(central):
         restarted.enqueue(expired)
         late = PostgresFixtureLedger(registry.engine("central"), clock=lambda: NOW+timedelta(hours=1))
         assert late.once((expired["idempotency_key"], "DST-EXPIRED"), unexpected).status == "skipped"
+        manual = plan("DST-MANUAL-HOLD")
+        restarted.enqueue(manual)
+        assert restarted.hold(manual["job_id"]) == "held"
+        assert restarted.hold(manual["job_id"]) == "held"
+        assert restarted.once((manual["idempotency_key"], "DST-MANUAL-HOLD"), unexpected).status == "skipped"
+        assert restarted.hold("unknown") is None
+        with pytest.raises(ValueError, match="already progressed"):
+            restarted.hold(job["job_id"])
+        overview = restarted.overview(limit=100)
+        by_id = {entry["job_id"]: entry for entry in overview["items"]}
+        assert by_id[manual["job_id"]]["state"] == "held"
+        assert by_id[job["job_id"]]["attempt"]["message_id"] == "fixture-msg"
+        assert "idempotency_key" not in by_id[job["job_id"]]
+
+        from fastapi.testclient import TestClient
+
+        from backend.app.dependencies import build_services
+        from backend.app.main import create_app
+        from backend.core.auth import Principal, issue_session
+        from backend.core.permissions import Grant
+
+        services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+            "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+            "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+        principal = Principal("fixture-publication-operator", "staff")
+        headers = {"Authorization": "Bearer " + issue_session(principal, services.session_key)}
+        pending = plan("DST-API-HOLD")
+        restarted.enqueue(pending)
+        path = "/v1/publishing/queue"
+        hold_path = path + "/" + pending["job_id"] + "/hold"
+        try:
+            with TestClient(create_app(services=services)) as client:
+                assert client.get(path).status_code == 401
+                assert client.get(path, headers=headers).status_code == 403
+                services.grants.grant(Grant(principal.subject_id, principal.role,
+                                            "publication_workspace", "default", "read"))
+                data = client.get(path, headers=headers)
+                assert data.status_code == 200 and data.headers["Cache-Control"] == "no-store"
+                assert data.json()["live_dispatch_available"] is False
+                assert data.json()["publishing_enabled"] is False
+                assert client.post(hold_path, headers=headers).status_code == 403
+                services.grants.grant(Grant(principal.subject_id, principal.role,
+                                            "publication_workspace", pending["job_id"], "hold"))
+                assert client.post(hold_path, headers=headers).json()["state"] == "held"
+                assert restarted.get(pending["job_id"])["state"] == "held"
+        finally:
+            services.registry.dispose()
         crash = plan("DST-CRASH")
         restarted.enqueue(crash)
 
@@ -1036,3 +1202,67 @@ def _exercise_publication_queue(central):
             command.downgrade(central, "009_image_assets")
     finally:
         registry.dispose()
+
+
+
+def _exercise_ai_cost_ledger():
+    from backend.core.ai_cost_ledger import PostgresCostLedger
+    from backend.core.ai_gateway import BudgetExceeded, FakeProvider, Gateway, ModelBinding
+
+    registry = DatabaseRegistry()
+    other_registry = DatabaseRegistry()
+    try:
+        ledger = PostgresCostLedger(registry.engine("central"))
+        other = PostgresCostLedger(other_registry.engine("central"))
+        binding = ModelBinding("translation", "fake", "fixture", run_budget_usd=.01, daily_budget_usd=.004)
+        calls = []
+
+        class RecordingProvider(FakeProvider):
+            def complete(self, prompt, *, model, timeout_s):
+                calls.append(1)
+                return super().complete(prompt, model=model, timeout_s=timeout_s)
+
+        provider = RecordingProvider(cost_per_call=.002)
+        first = Gateway({"translation": binding}, {"fake": provider}, enabled=True,
+                        monthly_budget_usd=.006, cost_ledger=ledger)
+        restarted = Gateway({"translation": binding}, {"fake": provider}, enabled=True,
+                            monthly_budget_usd=.006, cost_ledger=other)
+        result = first.call("translation", "fixture prompt")
+        assert result.cost_usd == .002
+        assert restarted.spent_usd == pytest.approx(.002)
+        pending = str(uuid4())
+        other.reserve(pending, binding, .002, monthly_budget_usd=.006)
+        with pytest.raises(BudgetExceeded):
+            restarted.call("translation", "must not dispatch")
+        assert calls == [1]
+        other.settle(pending, "released")
+        assert restarted.call("translation", "second").cost_usd == .002
+        task2 = ModelBinding("editorial", "fake", "fixture", run_budget_usd=.01, daily_budget_usd=.01)
+        candidates = [str(uuid4()), str(uuid4())]
+
+        def attempt(request_id):
+            try:
+                PostgresCostLedger(registry.engine("central")).reserve(
+                    request_id, task2, .002, monthly_budget_usd=.006)
+                return True
+            except BudgetExceeded:
+                return False
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, candidates))
+        assert outcomes.count(True) == 1
+        winner = candidates[outcomes.index(True)]
+        ledger.settle(winner, "unknown")
+        ledger.settle(winner, "unknown")
+        with pytest.raises(ValueError):
+            ledger.settle(winner, "released")
+        with pytest.raises(BudgetExceeded):
+            other.reserve(str(uuid4()), task2, .001, monthly_budget_usd=.006)
+        assert ledger.committed_usd() == pytest.approx(.006)
+        with registry.engine("central").connect() as conn:
+            rows = conn.execute(text("SELECT request_id,state FROM control.ai_cost_reservations")).all()
+            assert (result.request_id, "confirmed") in rows
+            assert (winner, "unknown") in rows
+    finally:
+        registry.dispose()
+        other_registry.dispose()

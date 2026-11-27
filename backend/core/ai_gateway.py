@@ -12,7 +12,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Mapping, Protocol
+from typing import Literal, Mapping, Protocol
 from uuid import uuid4
 
 
@@ -39,6 +39,7 @@ class ModelBinding:
     model: str
     timeout_s: float = 30.0
     run_budget_usd: float = 0.50
+    daily_budget_usd: float | None = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +73,16 @@ class Provider(Protocol):
         """Return (text, cost_usd); implementations must not log the prompt."""
 
 
+class CostLedger(Protocol):
+    def reserve(self, request_id: str, binding: ModelBinding, cost_usd: float,
+                *, monthly_budget_usd: float) -> None: ...
+
+    def settle(self, request_id: str, state: Literal["confirmed", "unknown", "released"],
+               *, cost_usd: float | None = None) -> None: ...
+
+    def committed_usd(self) -> float: ...
+
+
 @dataclass
 class FakeProvider:
     """Deterministic fixture provider; performs no network I/O."""
@@ -93,6 +104,7 @@ class Gateway:
     providers: Mapping[str, Provider]
     enabled: bool = False
     monthly_budget_usd: float = 25.0
+    cost_ledger: CostLedger | None = None
     _spent_usd: float = field(default=0.0, init=False, repr=False)
     _reserved_usd: float = field(default=0.0, init=False, repr=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
@@ -104,6 +116,8 @@ class Gateway:
 
     @property
     def spent_usd(self) -> float:
+        if self.cost_ledger is not None:
+            return self.cost_ledger.committed_usd()
         with self._lock:
             return round(self._spent_usd, 6)
 
@@ -124,6 +138,25 @@ class Gateway:
                 or not math.isfinite(binding.run_budget_usd) or binding.run_budget_usd < reserve
                 or not math.isfinite(self.monthly_budget_usd) or self.monthly_budget_usd < 0):
             raise BudgetExceeded("run cost exceeds its binding budget")
+        request_id = str(uuid4())
+        if self.cost_ledger is not None:
+            # The reservation must commit before the external call. If the
+            # database is unavailable, the request must not reach the provider.
+            self.cost_ledger.reserve(request_id, binding, reserve, monthly_budget_usd=self.monthly_budget_usd)
+            try:
+                text, cost = provider.complete(prompt, model=binding.model, timeout_s=binding.timeout_s)
+                if not math.isfinite(cost) or cost < 0 or cost > reserve + 1e-12:
+                    raise BudgetExceeded("provider returned an unconfirmed cost")
+            except BeforeProviderCall:
+                self.cost_ledger.settle(request_id, "released")
+                raise
+            except BaseException:
+                self.cost_ledger.settle(request_id, "unknown")
+                raise
+            # If settlement fails, the committed reservation survives; never
+            # return an apparently successful result without durable evidence.
+            self.cost_ledger.settle(request_id, "confirmed", cost_usd=cost)
+            return self._result(binding, prompt, text, cost, request_id)
         with self._lock:
             if self._spent_usd + self._reserved_usd + reserve > self.monthly_budget_usd + 1e-12:
                 raise BudgetExceeded("monthly AI budget is exhausted")
@@ -146,13 +179,17 @@ class Gateway:
         with self._lock:
             self._reserved_usd -= reserve
             self._spent_usd += cost
+        return self._result(binding, prompt, text, cost, request_id)
+
+    @staticmethod
+    def _result(binding: ModelBinding, prompt: str, text: str, cost: float, request_id: str) -> AiResult:
         return AiResult(
             text=text,
-            task=task,
+            task=binding.task,
             provider=binding.provider,
             model=binding.model,
             prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            request_id=str(uuid4()),
+            request_id=request_id,
             occurred_at=datetime.now(timezone.utc).isoformat(),
             cost_usd=cost,
         )
