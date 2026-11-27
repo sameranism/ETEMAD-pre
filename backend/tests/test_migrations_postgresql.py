@@ -68,13 +68,14 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 28
+            assert len(central_tables) == 29
             assert ("ui", "saved_views") in central_tables
             assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
             assert {("insights", "public_report_drafts"), ("executive", "private_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
             assert ("insights", "metric_snapshots") in central_tables
+            assert ("insights", "analyses") in central_tables
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
@@ -1362,6 +1363,39 @@ def _exercise_analysis_workspace(central):
             assert body["result"]["source_refs"] == [ref]
             assert body["evidence"][0]["news_id"] == raw["news_id"]
             assert "SECRET-DENIED" not in response.text
+            saved_path = "/v1/analysis/saved"
+            assert client.get(saved_path).status_code == 401
+            history = client.get(saved_path, headers=headers)
+            assert history.status_code == 200 and history.headers["Cache-Control"] == "no-store"
+            assert history.json()["result"] == body["result"]
+            assert history.json()["evidence"] == body["evidence"]
+            assert client.post("/v1/analysis/run", headers=headers, json=payload).json()["result"] == body["result"]
+            from alembic import command
+
+            from backend.modules.intelligence.analysis_store import PostgresAnalysisHistory
+            history_registry = DatabaseRegistry()
+            try:
+                store = PostgresAnalysisHistory(history_registry.engine("central"))
+                assert store.latest(principal)["result"] == body["result"]
+                assert store.latest(Principal(principal.subject_id, "editor_in_chief")) is None
+            finally:
+                history_registry.dispose()
+            with pytest.raises(DBAPIError, match="analysis history is not empty"):
+                command.downgrade(central, "017_metric_snapshots")
+            news_grant = Grant(principal.subject_id, "staff", "newsroom", raw["news_id"], "read")
+            services.grants.revoke(news_grant)
+            assert client.get(saved_path, headers=headers).status_code == 403
+            services.grants.grant(news_grant)
+            services.sources.register({**source, "license_scope": "metadata"})
+            assert client.get(saved_path, headers=headers).status_code == 403
+            services.sources.register(source)
+            run_grant = Grant(principal.subject_id, "staff", "analysis_workspace", "default", "run")
+            services.grants.revoke(run_grant)
+            assert client.get(saved_path, headers=headers).status_code == 403
+            # Even without a run grant, users can erase their own history.
+            assert client.delete(saved_path, headers=headers).json() == {"schema_version": "1.0", "deleted": True}
+            services.grants.grant(run_grant)
+            assert client.get(saved_path, headers=headers).json()["result"] is None
             chat = client.post("/v1/analysis/chat", headers=headers, json=payload).json()
             assert chat["result"]["citations"][0]["source_ref"] == ref
             assert chat["result"]["citations"][0]["quote_span"] in raw["original_text"]

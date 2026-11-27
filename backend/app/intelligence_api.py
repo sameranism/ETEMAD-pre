@@ -157,9 +157,77 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
             services: Services = Depends(services_dep)) -> dict[str, Any]:
         bundle = bundle_for(payload, request, principal, services, "run")
         result = analyze(payload.query, bundle)
+        evidence = [item.reference() for item in bundle.evidence]
+        if result is not None and services.analyses is not None:
+            try:
+                saved = services.analyses.save(principal, result, evidence)
+                result, evidence = saved["result"], saved["evidence"]
+            except ValueError:
+                raise APIError(ErrorCode.INVALID_STATE) from None
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "mode": "extractive", "result": result,
-                "evidence": [item.reference() for item in bundle.evidence], "bounded": bundle.bounded}
+                "evidence": evidence, "bounded": bundle.bounded}
+
+    def analysis_access(request: Request, principal: Principal, services: Services) -> None:
+        corr = correlation_id(request)
+        authorize(services, principal, resource_type="analysis_workspace", resource_id="default",
+                  action="run", correlation_id=corr)
+        authorize(services, principal, resource_type="archive", resource_id="default",
+                  action="search", correlation_id=corr)
+
+    @router.get("/saved")
+    def read_saved_analysis(request: Request, response: Response,
+                            principal: Principal = Depends(principal_dep),
+                            services: Services = Depends(services_dep)) -> dict[str, Any]:
+        analysis_access(request, principal, services)
+        if services.analyses is None or services.news_archive is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        try:
+            saved = services.analyses.latest(principal)
+            if saved is not None:
+                # A previously permitted quotation is not a permanent right.
+                # Recheck every news ACL, source license and immutable version
+                # before returning *any* part of a historical result.
+                levels = {"metadata": 0, "summary": 1, "full_text": 2}
+                for item in saved["evidence"]:
+                    for kind in ("archive", "newsroom"):
+                        authorize(services, principal, resource_type=kind,
+                                  resource_id=item["news_id"], action="read",
+                                  correlation_id=correlation_id(request))
+                    source = services.sources.require_usable(item["source_id"], stream=item["stream"])
+                    versions = services.news_archive.versions(item["news_id"])
+                    if (not any(v["artifact_id"] == item["source_ref"] and v["sha256"] == item["sha256"]
+                                for v in versions)
+                            or source["license_scope"] not in levels
+                            or item["content_scope"] not in levels
+                            or (not item["text_redacted"]
+                                and levels[source["license_scope"]] < levels[item["content_scope"]])):
+                        raise APIError(ErrorCode.FORBIDDEN)
+                analysis_access(request, principal, services)
+        except (SourceNotAllowed, SourceNotFound):
+            raise APIError(ErrorCode.NOT_FOUND) from None
+        except ValueError:
+            raise APIError(ErrorCode.INVALID_STATE) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "mode": "extractive",
+                "result": saved["result"] if saved else None,
+                "evidence": saved["evidence"] if saved else [], "bounded": True}
+
+    @router.delete("/saved")
+    def clear_saved_analysis(request: Request, response: Response,
+                             principal: Principal = Depends(principal_dep),
+                             services: Services = Depends(services_dep)) -> dict[str, Any]:
+        # Like chat-memory deletion, a revoked analysis grant must not prevent
+        # a subject from removing their own content. Never accept a subject id.
+        if services.analyses is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        services.auditor.record(action="analysis_history.clear", actor_id=principal.subject_id,
+                                actor_role=principal.role, resource_type="analysis_history",
+                                resource_id="self", decision="self_delete",
+                                correlation_id=correlation_id(request))
+        services.analyses.clear(principal)
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "deleted": True}
 
     @router.post("/chat")
     def chat(payload: EvidenceInput, request: Request, response: Response,

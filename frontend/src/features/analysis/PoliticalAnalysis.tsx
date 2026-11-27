@@ -157,6 +157,37 @@ function AnalysisSession({ token }: { token: string }) {
         ? "مجوز مشاهده شاخص‌های تحریریه وجود ندارد." : "محاسبه شاخص‌ها در دسترس نیست.");
     } finally { if (!controller.signal.aborted) setMetricsBusy(false); }
   }
+  async function analysisHistory(method: "GET" | "DELETE") {
+    if (busy || metricsBusy) return;
+    const controller = new AbortController(); active.current = controller;
+    setBusy(true); setMessage(""); setResult(null); setReport(null); setSelectedTool("");
+    try {
+      const response = await fetch("/v1/analysis/saved", {
+        method, signal: controller.signal, credentials: "same-origin",
+        cache: "no-store", redirect: "error",
+        headers: { Authorization: "Bearer " + token }
+      });
+      if (response.status === 401 || response.status === 403) throw new Error("denied");
+      if (!response.ok) throw new Error("unavailable");
+      const data: unknown = await response.json();
+      if (controller.signal.aborted) return;
+      if (method === "GET") {
+        const saved = parseAnalysis(data, "run");
+        setResult(saved);
+        setSelectedTool(saved.result ? "تحلیل ذخیره‌شده" : "");
+        setMessage(saved.result ? "تحلیل با مجوزهای فعلی منابع بازیابی شد." : "تحلیل ذخیره‌شده‌ای وجود ندارد.");
+      } else {
+        if (!isObject(data) || data.schema_version !== "1.0" || data.deleted !== true) {
+          throw new Error("invalid deletion response");
+        }
+        setMessage("تاریخچه تحلیل شما حذف شد.");
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setMessage(error instanceof Error && error.message === "denied"
+        ? "مجوز بازیابی تحلیل یا منابع آن دیگر معتبر نیست."
+        : "تاریخچه تحلیل در دسترس نیست.");
+    } finally { if (!controller.signal.aborted) setBusy(false); }
+  }
   async function memoryAction(method: "GET" | "PUT" | "DELETE") {
     if (busy || (method === "PUT" && !context)) return;
     const controller = new AbortController(); active.current = controller;
@@ -246,6 +277,15 @@ function AnalysisSession({ token }: { token: string }) {
           <li key={row.topic}>{row.topic}: {row.count}</li>)}</ul>}
       </div>}
     </section>
+    <div className="grid gap-2">
+      <p>تحلیل‌های مستند در فضای خصوصی ذخیره می‌شوند؛ هر بازیابی مجوز کنونی منبع را دوباره بررسی می‌کند.</p>
+      <button type="button" disabled={busy || metricsBusy} onClick={() => void analysisHistory("GET")}>
+        بازیابی آخرین تحلیل ذخیره‌شده
+      </button>
+      <button type="button" disabled={busy || metricsBusy} onClick={() => void analysisHistory("DELETE")}>
+        حذف تاریخچه تحلیل من
+      </button>
+    </div>
     <form className="grid gap-2" onSubmit={submit}>
       <fieldset disabled={busy} className="grid gap-2">
         <label>ابزار دستیار <select value={mode} onChange={event => {
