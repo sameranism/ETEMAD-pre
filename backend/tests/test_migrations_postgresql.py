@@ -881,13 +881,59 @@ def _exercise_editorial_workspace(central):
             assert generated["policy"]["decision"] == "human_review"
             assert client.post(generation_path, headers=gh, json=generate).json()["saved"] == generated
             assert provider.calls == ["fixture-translation", "fixture-editorial"]
+            from backend.app.workflow_worker import WorkflowWorker
+
+            # The worker must consume actual outbox jobs, not an injected fake queue.
+            # Isolate this worker run from earlier synthetic processing fixtures.
+            _clear_workflow_test_rows(services.registry)
+            worker = WorkflowWorker(services, lambda: principal)
+            new_raw = {**raw, "news_id": "NEWS-WORKER-PG", "original_url": "https://example.invalid/editorial/worker"}
+            denied_raw = {**raw, "news_id": "NEWS-WORKER-DENIED", "original_url": "https://example.invalid/editorial/denied"}
+            services.pipeline.process(denied_raw)
+            assert worker.run_one(project="P12", stream="foreign") == "held"
+            assert services.editorial.get(denied_raw["news_id"]) is None
+            assert len(provider.calls) == 2
+            services.pipeline.process(new_raw)
+            for resource, action in (("newsroom", "read"), ("editorial_workspace", "write"),
+                                     ("editorial_workspace", "generate")):
+                services.grants.grant(Grant(principal.subject_id, "staff", resource, new_raw["news_id"], action))
+            assert worker.run_one(project="P13", stream="domestic") == "empty"
+            assert worker.run_one(project="P12", stream="foreign") == "done"
+            worker_saved = services.editorial.get(new_raw["news_id"])
+            assert worker_saved["version"] == 1
+            assert worker_saved["translation"]["model_id"] == "fixture/fixture-translation"
+            assert worker_saved["quality"]["generation"]["mode"] == "fixture"
+            assert worker_saved["policy"]["decision"] == "human_review"
+            assert services.workflow_jobs.counts() == {"held": 1, "done": 1}
+            assert worker.run_one(project="P12", stream="foreign") == "empty"
+            assert len(provider.calls) == 4
+            # Revocation between translation and editorial must prevent the next call.
+            revoked_raw = {**raw, "news_id": "NEWS-WORKER-REVOKED", "original_url": "https://example.invalid/editorial/revoked"}
+            services.pipeline.process(revoked_raw)
+            for resource, action in (("newsroom", "read"), ("editorial_workspace", "write"),
+                                     ("editorial_workspace", "generate")):
+                services.grants.grant(Grant(principal.subject_id, "staff", resource, revoked_raw["news_id"], action))
+            original_complete = provider.complete
+
+            def revoke_after_translation(prompt, *, model, timeout_s):
+                result = original_complete(prompt, model=model, timeout_s=timeout_s)
+                services.grants.revoke(Grant(principal.subject_id, "staff", "editorial_workspace",
+                                             revoked_raw["news_id"], "generate"))
+                return result
+
+            provider.complete = revoke_after_translation
+            assert worker.run_one(project="P12", stream="foreign") == "failed"
+            assert provider.calls[-1] == "fixture-translation" and len(provider.calls) == 5
+            assert services.editorial.get(revoked_raw["news_id"]) is None
+            assert services.workflow_jobs.counts() == {"held": 1, "done": 1, "failed": 1}
+            provider.complete = original_complete
             assert client.get(path, headers=headers).json()["saved"] == generated
             assert client.get(path + "?version=1", headers=headers).json()["saved"] == saved
             services.sources.set_enabled(source["source_id"], False)
             assert client.get(path, headers=headers).status_code == 403
             assert client.put(path, headers={**h, "Idempotency-Key": "revoked"}, json=updated).status_code == 403
             assert client.post(generation_path, headers=gh, json=generate).status_code == 403
-            assert len(provider.calls) == 2
+            assert len(provider.calls) == 5
         engine = services.registry.engine("central")
         engine.dispose()
         reopened = EditorialRepository(engine)

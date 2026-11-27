@@ -14,7 +14,7 @@ from typing import Any, Callable, Mapping
 from uuid import uuid4
 
 from sqlalchemy import text
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 
 class JobState(str, Enum):
@@ -250,17 +250,44 @@ class PostgresWorkflowJobs:
                    "seconds": lease_seconds}).mappings().one_or_none()
             return dict(row) if row is not None else None
 
+    def _finish(self, conn: Connection, *, job_id: str, lease_token: str,
+                state: str, error: str | None) -> None:
+        if conn.engine is not self._engine or not conn.in_transaction():
+            raise InvalidTransition("workflow acknowledgement requires owning transaction")
+        row = conn.execute(text("""
+            UPDATE orchestration.jobs SET state=:state,last_error=:error,
+                lease_token=NULL,lease_until=NULL,updated_at=clock_timestamp()
+            WHERE job_id=:id AND state='running' AND lease_token=:token
+              AND lease_until>clock_timestamp() AND deadline_at>clock_timestamp()
+            RETURNING job_id
+        """), {"id": job_id, "token": lease_token, "state": state,
+               "error": error}).scalar_one_or_none()
+        if row is None:
+            raise InvalidTransition("workflow lease is stale")
+
+    def complete_in_transaction(self, conn: Connection, *, job_id: str, lease_token: str) -> None:
+        """Commit acknowledgement atomically with the authoritative result."""
+        self._finish(conn, job_id=job_id, lease_token=lease_token, state="done", error=None)
+
+    def lease_is_current(self, *, job_id: str, lease_token: str) -> bool:
+        with self._engine.connect() as conn:
+            return bool(conn.execute(text("""
+                SELECT EXISTS(SELECT 1 FROM orchestration.jobs
+                    WHERE job_id=:id AND state='running' AND lease_token=:token
+                    AND lease_until>clock_timestamp() AND deadline_at>clock_timestamp())
+            """), {"id": job_id, "token": lease_token}).scalar_one())
+
     def finish(self, *, job_id: str, lease_token: str, success: bool) -> None:
         with self._engine.begin() as conn:
-            row = conn.execute(text("""
-                UPDATE orchestration.jobs SET state=:state,last_error=:error,
-                    lease_token=NULL,lease_until=NULL,updated_at=now()
-                WHERE job_id=:id AND state='running' AND lease_token=:token AND lease_until>now()
-                RETURNING job_id
-            """), {"id": job_id, "token": lease_token, "state": "done" if success else "failed",
-                   "error": None if success else "job_failed"}).scalar_one_or_none()
-            if row is None:
-                raise InvalidTransition("workflow lease is stale")
+            self._finish(conn, job_id=job_id, lease_token=lease_token,
+                         state="done" if success else "failed",
+                         error=None if success else "job_failed")
+
+    def hold_claim(self, *, job_id: str, lease_token: str) -> None:
+        """Hold an executing claim before any model request; no automatic drain."""
+        with self._engine.begin() as conn:
+            self._finish(conn, job_id=job_id, lease_token=lease_token,
+                         state="held", error="job_held")
 
     def hold(self, *, job_id: str) -> None:
         with self._engine.begin() as conn:

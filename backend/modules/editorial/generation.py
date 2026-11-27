@@ -6,7 +6,7 @@ An operator-approved composition must supply the gateway and scoped rules.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Mapping
+from typing import Any, Callable, Literal, Mapping
 
 from backend.core.ai_gateway import Gateway
 from backend.core.contracts import validate_payload
@@ -76,14 +76,19 @@ class EditorialGenerator:
             for task in ("translation", "editorial") if task in self._gateway.bindings
         ]]))
 
-    def generate(self, raw: Mapping[str, Any], *, desk: str) -> GeneratedDraft:
+    def generate(self, raw: Mapping[str, Any], *, desk: str,
+                 revalidate: Callable[[], None] | None = None) -> GeneratedDraft:
         source = checked_source(raw)
         if not self.available(source, desk):
             raise ValueError("editorial generation unavailable")
         profile = self._profiles[(source["stream"], desk)]
         tr = None
         if source["stream"] == "foreign" and source["language"] != "fa":
+            if revalidate is not None:
+                revalidate()
             tr = translate(source, gateway=self._gateway, ruleset=profile.ruleset, desk=desk)
+        if revalidate is not None:
+            revalidate()
         article = create_draft(source, gateway=self._gateway, ruleset=profile.ruleset,
                                framework=profile.framework, translation=tr)
         return GeneratedDraft(article, tr, self.mode)
