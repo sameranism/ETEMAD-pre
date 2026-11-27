@@ -71,3 +71,55 @@ def test_private_changed_and_unapproved_objects_denied():
     with pytest.raises(ValueError, match="approval"):
         ApprovedContent("article", ARTICLE, {**DECISION, "decision": "human_review", "expires_at": None},
                         content_hash(ARTICLE), "domestic")
+
+
+def test_telegram_official_adapter_is_default_off_and_handles_ambiguous_delivery():
+    from backend.adapters.telegram import TelegramAdapter
+    from backend.core.secrets import InMemorySecretStore
+    from backend.modules.publishing.formatter import format_text
+
+    dest = Destination({**destination("DST-TG", "telegram").config,
+                        "address": "@test_channel", "credential_ref": "telegram/test"}, "telegram")
+    approved = ApprovedContent("article", ARTICLE, DECISION, content_hash(ARTICLE), "domestic")
+    off = default_off_switches()
+    job = plan_job(approved, dest, scheduled_at=NOW, deadline=NOW+timedelta(minutes=5),
+                   now=NOW, switches=off)
+    payload = format_text(approved, job, dest, max_chars=4096)
+    secrets = InMemorySecretStore({"telegram/test": "123456:" + "a"*30})
+    calls = []
+
+    def transport(token, body):
+        calls.append(body)
+        return 200, b'{"ok":true,"result":{"message_id":42}}'
+
+    adapter = TelegramAdapter("telegram", dest.config, secrets, transport=transport)
+    assert adapter.publish(payload, idempotency_key="key").status == "skipped"
+    assert calls == []
+    live = TelegramAdapter("telegram", dest.config, secrets, transport=transport,
+                           authorized=lambda: True)
+    assert live.publish(payload, idempotency_key="key").message_id == "42"
+    assert calls == [{"chat_id": "@test_channel", "text": payload["text"]}]
+    assert live.status("key") is None
+    with pytest.raises(ValueError):
+        live.dry_run({**payload, "destination_id": "wrong"})
+    with pytest.raises(ValueError):
+        live.dry_run({**payload, "text": "a"*4097})
+    with pytest.raises(ValueError):
+        AdapterRegistry({"telegram": live})
+    for code, body, expected in (
+        (400, b'{"ok":false}', "failed"),
+        (429, b'{"ok":false}', "failed"),
+        (500, b'{"ok":false}', "unknown"),
+        (200, b'{"ok":true}', "unknown"),
+    ):
+        def responder(token, data):
+            return code, body
+        live = TelegramAdapter("telegram", dest.config, secrets, transport=responder,
+                               authorized=lambda: True)
+        assert live.publish(payload, idempotency_key="key").status == expected
+
+    def timeout(token, data):
+        raise TimeoutError("synthetic transport timeout")
+    live = TelegramAdapter("telegram", dest.config, secrets, transport=timeout,
+                           authorized=lambda: True)
+    assert live.publish(payload, idempotency_key="key").status == "unknown"
