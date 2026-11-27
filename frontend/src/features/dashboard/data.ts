@@ -90,7 +90,7 @@ export function parseOwner(x: unknown): OwnerData {
         (a.consecutive_failures === null || count(a.consecutive_failures))) ||
       !object(v.sources.monitoring) || Object.keys(v.sources.monitoring).length !== 2 ||
       !["domestic", "foreign"].every(k => ["ok", "unavailable", "not_authorized"].includes(
-        String((v.sources!.monitoring as Record<string, unknown>)[k]))))) throw new Error("source health");
+        String(((v.sources as Record<string, unknown>).monitoring as Record<string, unknown>)[k]))))) throw new Error("source health");
   if (v.ai_cost !== undefined && (!object(v.ai_cost) || !text(v.ai_cost.period) ||
       v.ai_cost.basis !== "ledger_estimate_utc_month" ||
       !(v.ai_cost.committed_usd === null || (typeof v.ai_cost.committed_usd === "number" &&
