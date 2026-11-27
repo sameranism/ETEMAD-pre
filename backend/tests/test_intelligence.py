@@ -119,4 +119,4 @@ def test_analysis_preserves_chronology_and_distinct_source_narratives():
     assert len(narrative) == 1
     assert narrative[0]["source_refs"] == [early.artifact_id, late.artifact_id]
     assert "صورت‌بندی متمایز" in narrative[0]["text"]
-    assert "تعارض factual را اثبات نمی‌کند" in narrative[0]["text"]
+    assert "تناقض واقعی را اثبات نمی‌کند" in narrative[0]["text"]
