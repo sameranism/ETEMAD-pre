@@ -21,7 +21,7 @@ from sqlalchemy.engine import make_url
 
 from backend.app.foreign_workflow import ForeignWorkflow, build_foreign_fixture_workflow
 from backend.app.pipeline import IngestPipeline
-from backend.core.archive import InMemoryArchiveStore
+from backend.core.archive import InMemoryArchiveStore, PostgresNewsArchive
 from backend.core.audit import Auditor, InMemoryAuditSink, PostgresAuditSink
 from backend.core.auth import PostgresAccountStore
 from backend.core.db import DatabaseRegistry
@@ -80,6 +80,7 @@ class Services:
     accounts: PostgresAccountStore | None = None
     foreign_workflow: ForeignWorkflow | None = None
     editorial: EditorialRepository | None = None
+    news_archive: PostgresNewsArchive | None = None
     orchestrator: Orchestrator = field(init=False)
 
     def run_domestic_schedule(self, *, worker_id: str, limit: int = 10) -> list[PollResult]:
@@ -185,6 +186,8 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     archive = InMemoryArchiveStore()
     objects = LocalObjectStore(Path(environ.get("ETEMAD_OBJECT_ROOT", "backend/.local-objects")))
 
+    news_archive = PostgresNewsArchive(registry.engine("central"), objects) if storage == "postgres" else None
+
     def switches() -> OutputSwitches:
         stored = settings.get_latest("output_controls", "controls-main", "global")
         if stored is None:
@@ -218,6 +221,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         poll_states=poll_states,
         schedules=schedules,
         transport=transport,
+        news_archive=news_archive,
     )
 
     foreign_workflow: ForeignWorkflow | None = None
@@ -256,6 +260,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         transport=transport,
         accounts=accounts,
         foreign_workflow=foreign_workflow,
+        news_archive=news_archive,
         editorial=EditorialRepository(registry.engine("central")) if storage == "postgres" else None,
     )
 

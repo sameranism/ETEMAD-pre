@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field, SecretStr
 
+from backend.app.archive_api import build_router as build_archive_router
 from backend.app.dependencies import Services, get_services
 from backend.core.auth import (
     MAX_PASSWORD_LENGTH,
@@ -378,6 +379,15 @@ router.include_router(
 
 router.include_router(
     build_editorial_router(
+        services_dep=get_services,
+        principal_dep=current_principal,
+        authorize=_authorize,
+        correlation_id=_correlation_id,
+    )
+)
+
+router.include_router(
+    build_archive_router(
         services_dep=get_services,
         principal_dep=current_principal,
         authorize=_authorize,

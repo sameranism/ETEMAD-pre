@@ -32,7 +32,8 @@ TABLES_SQL = """
 
 
 @pytest.mark.skipif(not ADMIN_URL, reason="ETEMAD_TEST_PG_ADMIN_URL is unset")
-def test_migration_round_trip_and_database_separation(monkeypatch):
+def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
+    monkeypatch.setenv("ETEMAD_OBJECT_ROOT", str(tmp_path / "objects"))
     from alembic import command
     from alembic.config import Config
 
@@ -67,20 +68,21 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 15
+            assert len(central_tables) == 17
+            assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
             assert ("processing", "foreign_inbox") in central_tables
             assert {('sources', 'source_registry'), ('sources', 'source_history')} <= central_tables
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources", "editorial",
+                "audit", "control", "identity", "processing", "sources", "editorial", "archive",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial"} and row != ("identity", "login_throttle")
+                if row[0] not in {"processing", "sources", "editorial", "archive"} and row != ("identity", "login_throttle")
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -121,8 +123,9 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             command.upgrade(foreign, "head")
             _exercise_foreign_storage(foreign, os.environ["ETEMAD_DB_FOREIGN_URL"])
             _exercise_foreign_inbox(central)
-            _exercise_foreign_dashboard()
             _exercise_editorial_workspace(central)
+            _exercise_foreign_dashboard()
+            _exercise_archive_workspace(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -419,6 +422,8 @@ def _exercise_foreign_inbox(central):
     services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
         "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
         "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    # Isolate the older migration's downgrade guard from the later P26 archive.
+    services.pipeline.news_archive = None
     source = {
         "source_id": "SRC-BRIDGE-FIXTURE", "site_url": "https://example.invalid/bridge/",
         "feed_url": "https://example.invalid/bridge/rss", "country": "DE", "language": "de",
@@ -546,6 +551,8 @@ def _exercise_editorial_workspace(central):
     services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
         "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
         "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    # Isolate the older migration's downgrade guard from the later P26 archive.
+    services.pipeline.news_archive = None
     source = {"source_id": "SRC-EDITORIAL-FIXTURE", "site_url": "https://example.invalid/editorial",
         "feed_url": "https://example.invalid/editorial/rss", "country": "DE", "language": "en",
         "stream": "foreign", "license_scope": "summary", "enabled": True}
@@ -616,5 +623,87 @@ def _exercise_editorial_workspace(central):
         assert reopened.get(news_id, 1) == saved
         with pytest.raises(DBAPIError, match="editorial history is not empty"):
             command.downgrade(central, "006_foreign_inbox")
+    finally:
+        services.registry.dispose()
+
+def _exercise_archive_workspace(central):
+    from alembic import command
+    from fastapi.testclient import TestClient
+
+    from backend.app.dependencies import build_services
+    from backend.app.main import create_app
+    from backend.core.archive import ArchiveIntegrityError, PostgresNewsArchive
+    from backend.core.auth import Principal, issue_session
+    from backend.core.permissions import Grant
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    source = {"source_id": "SRC-ARCHIVE-FIXTURE", "site_url": "https://example.invalid/archive",
+        "feed_url": "https://example.invalid/archive/rss", "country": "DE", "language": "en",
+        "stream": "foreign", "license_scope": "summary", "enabled": True}
+    raw = {"schema_version": "1.0", "news_id": "NEWS-ARCHIVE-FIXTURE", "stream": "foreign",
+        "source_id": source["source_id"], "source_country": "DE", "language": "en",
+        "original_url": "https://example.invalid/archive/one", "original_title": "Archive fixture % literal",
+        "original_text": "Original immutable text", "subject_countries": [],
+        "collected_at": "2026-11-26T19:00:00+00:00", "content_scope": "summary",
+        "reuse_permission": "unverified"}
+    news_id = raw["news_id"]
+    principal = Principal("fixture-archive", "staff")
+    headers = {"Authorization": "Bearer " + issue_session(principal, services.session_key)}
+    repo = services.news_archive
+    assert repo is not None
+    services.sources.register(source)
+    services.pipeline.process(raw)
+    try:
+        assert len(repo.versions(news_id)) == 1
+        first = repo.capture({**raw, "collected_at": "2026-11-27T01:00:00+00:00"})
+        assert first["stored_at"] == raw["collected_at"]
+        assert len(repo.versions(news_id)) == 1
+        revised = repo.capture({**raw, "original_text": "A later correction"})
+        assert revised["archive_id"] != first["archive_id"]
+        assert repo.original(news_id, first["archive_id"]) == raw
+        with pytest.raises(ArchiveIntegrityError, match="identity conflict"):
+            repo.capture({**raw, "original_url": "https://example.invalid/archive/different"})
+        assert len(repo.versions(news_id)) == 2
+        # A separate object with identical search terms must not leak via search counts.
+        repo.capture({**raw, "news_id": "NEWS-ARCHIVE-DENIED"})
+        with TestClient(create_app(services=services)) as client:
+            path = "/v1/archive/news"
+            assert client.get(path).status_code == 401
+            assert client.get(path, headers=headers).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "archive", "default", "search"))
+            assert client.get(path, headers=headers).json()["items"] == []
+            services.grants.grant(Grant(principal.subject_id, "staff", "archive", news_id, "read"))
+            assert client.get(path, headers=headers).json()["items"] == []
+            services.grants.grant(Grant(principal.subject_id, "staff", "newsroom", news_id, "read"))
+            matches = client.get(path, params={"q": "% literal", "stream": "foreign"}, headers=headers)
+            assert matches.status_code == 200 and matches.headers["Cache-Control"] == "no-store"
+            assert matches.json()["count"] == 1 and matches.json()["items"][0]["news_id"] == news_id
+            assert client.get(path, params={"q": "notfound%"}, headers=headers).json()["count"] == 0
+            vp = path + "/" + news_id + "/versions"
+            assert len(client.get(vp, headers=headers).json()["versions"]) == 2
+            original_path = vp + "/" + first["archive_id"]
+            assert client.get(original_path, headers=headers).json()["source"] == raw
+            assert client.get(vp + "/raw-" + "0"*64, headers=headers).status_code == 404
+            assert client.get(vp.replace(news_id, "NEWS-ARCHIVE-DENIED"), headers=headers).status_code == 403
+            services.sources.register({**source, "license_scope": "metadata"})
+            redacted = client.get(original_path, headers=headers).json()
+            assert redacted["text_redacted"] and redacted["source"]["original_text"] is None
+            services.sources.set_enabled(source["source_id"], False)
+            assert client.get(original_path, headers=headers).status_code == 403
+            assert client.get(path, headers=headers).json()["count"] == 0
+            services.sources.register(source)
+            engine = services.registry.engine("central")
+            engine.dispose()
+            reopened = PostgresNewsArchive(engine, services.objects)
+            assert reopened.original(news_id, first["archive_id"]) == raw
+            # Corrupt only a disposable test object, not the original stage data.
+            services.objects.put(first["payload_ref"], b"corrupt")
+            assert client.get(original_path, headers=headers).status_code == 422
+            with pytest.raises(ArchiveIntegrityError, match="checksum"):
+                reopened.capture(raw)
+        with pytest.raises(DBAPIError, match="news archive is not empty"):
+            command.downgrade(central, "007_editorial_revisions")
     finally:
         services.registry.dispose()

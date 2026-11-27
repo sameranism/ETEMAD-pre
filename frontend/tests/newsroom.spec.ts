@@ -1,6 +1,7 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import ArchiveSearch, { parseArchive } from "../src/features/archive/ArchiveSearch";
 import App, { parseNewsFeed } from "../src/app/App";
 import Login from "../src/features/auth/Login";
 import ArticleEditor, { parseEditorialPreview } from "../src/features/editor/ArticleEditor";
@@ -250,5 +251,18 @@ describe("source-linked durable drafts", () => {
     expect(html).toContain(item.title);
     expect(html).not.toContain("fixture-not-a-real-token");
     expect(html).not.toContain("ذخیره نسخه جدید");
+  });
+});
+
+describe("archive search", () => {
+  it("accepts bounded server results and rejects a private stream or inconsistent count", () => {
+    const row = { news_id: "NEWS-ARCHIVE", title: "خبر", stream: "foreign", source_id: "SRC-ARCHIVE",
+      received_at: "2026-11-27T00:00:00Z" };
+    expect(parseArchive({ schema_version: "1.0", count: 1, items: [row] })).toHaveLength(1);
+    expect(() => parseArchive({ schema_version: "1.0", count: 0, items: [row] })).toThrow();
+    expect(() => parseArchive({ schema_version: "1.0", count: 1, items: [{ ...row, stream: "executive_private" }] })).toThrow();
+    const html = renderToStaticMarkup(createElement(ArchiveSearch, { token: "fixture-not-real" }));
+    expect(html).toContain("جست‌وجو در آرشیو مجاز");
+    expect(html).not.toContain("fixture-not-real");
   });
 });
