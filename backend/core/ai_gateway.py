@@ -8,6 +8,7 @@ an explicit enable plus a configured binding it makes no external call.
 from __future__ import annotations
 
 import hashlib
+import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
@@ -17,6 +18,10 @@ from uuid import uuid4
 
 class GatewayDisabled(RuntimeError):
     """No external model call is allowed in this process."""
+
+
+class BeforeProviderCall(RuntimeError):
+    """No external request was attempted; reservation can be released."""
 
 
 class BudgetExceeded(RuntimeError):
@@ -75,6 +80,9 @@ class FakeProvider:
     reply: str = "fixture-output"
     cost_per_call: float = 0.001
 
+    def maximum_cost(self, prompt: str, *, model: str) -> float:
+        return self.cost_per_call
+
     def complete(self, prompt: str, *, model: str, timeout_s: float) -> tuple[str, float]:
         return f"{self.reply}:{model}:{len(prompt)}", self.cost_per_call
 
@@ -86,6 +94,7 @@ class Gateway:
     enabled: bool = False
     monthly_budget_usd: float = 25.0
     _spent_usd: float = field(default=0.0, init=False, repr=False)
+    _reserved_usd: float = field(default=0.0, init=False, repr=False)
     _lock: Lock = field(default_factory=Lock, init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -107,13 +116,35 @@ class Gateway:
         if not prompt or len(prompt) > 200_000:
             raise ValueError("prompt must be non-empty and bounded")
         provider = self.providers[binding.provider]
-        if self.spent_usd >= self.monthly_budget_usd:
-            raise BudgetExceeded("monthly AI budget is exhausted")
-
-        text, cost = provider.complete(prompt, model=binding.model, timeout_s=binding.timeout_s)
-        if cost > binding.run_budget_usd:
-            raise BudgetExceeded("run cost exceeded its binding budget")
+        # Older fixture adapters retain the existing Provider interface. Live
+        # routes supply an explicit maximum_cost based on approved token limits.
+        maximum_cost = getattr(provider, "maximum_cost", None)
+        reserve = maximum_cost(prompt, model=binding.model) if callable(maximum_cost) else binding.run_budget_usd
+        if (not math.isfinite(reserve) or reserve < 0
+                or not math.isfinite(binding.run_budget_usd) or binding.run_budget_usd < reserve
+                or not math.isfinite(self.monthly_budget_usd) or self.monthly_budget_usd < 0):
+            raise BudgetExceeded("run cost exceeds its binding budget")
         with self._lock:
+            if self._spent_usd + self._reserved_usd + reserve > self.monthly_budget_usd + 1e-12:
+                raise BudgetExceeded("monthly AI budget is exhausted")
+            self._reserved_usd += reserve
+        try:
+            text, cost = provider.complete(prompt, model=binding.model, timeout_s=binding.timeout_s)
+            if not math.isfinite(cost) or cost < 0 or cost > reserve + 1e-12:
+                raise BudgetExceeded("provider returned an unconfirmed cost")
+        except BeforeProviderCall:
+            with self._lock:
+                self._reserved_usd -= reserve
+            raise
+        except BaseException:
+            # Unknown delivery may still be billed: retain the conservative
+            # charge and never silently retry or fall back.
+            with self._lock:
+                self._reserved_usd -= reserve
+                self._spent_usd += reserve
+            raise
+        with self._lock:
+            self._reserved_usd -= reserve
             self._spent_usd += cost
         return AiResult(
             text=text,
