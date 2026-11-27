@@ -72,3 +72,20 @@ def test_rejects_bad_raster_restricted_rights_and_oversize(tmp_path, raster, mon
     with pytest.raises(ValueError, match="dimensions"):
         prepare_image(ARTICLE, raw, objects=store, rights=ImageRights("fixture:upload"),
                       alt_text="fixture")
+
+
+def test_local_card_uses_persian_title_and_all_three_real_sizes(tmp_path, raster):
+    from backend.modules.editorial.news_card import prepare_news_card
+
+    image, _ = raster
+    store = LocalObjectStore(tmp_path)
+    article = {**ARTICLE, "title": "بررسی تازه‌ترین تحولات اقتصادی"}
+    result = prepare_news_card(article, objects=store)
+    assert result.evidence["origin"] == "local_typographic_card"
+    assert result.evidence["publication_eligible"] is False
+    assert len(result.manifest["assets"]) == 3
+    for asset, evidence in zip(result.manifest["assets"], result.evidence["assets"], strict=True):
+        data, _ = verify_asset(store, asset, evidence)
+        assert image.open(BytesIO(data)).size == (asset["width"], asset["height"])
+        assert "تصویر واقعی" in asset["alt_text"]
+        assert asset["ai_generated"] is False
