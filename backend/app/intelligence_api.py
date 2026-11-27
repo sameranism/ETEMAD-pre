@@ -19,6 +19,12 @@ from backend.core.output_switches import PUBLIC_ANALYSIS
 from backend.core.permissions import decide_access
 from backend.core.sources_service import SourceNotAllowed, SourceNotFound
 from backend.modules.intelligence.analysis import analyze
+from backend.modules.intelligence.assistant import (
+    TOOLS,
+    AssistantRequestAction,
+    identity,
+    select_action,
+)
 from backend.modules.intelligence.chat import answer_question
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
 from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
@@ -34,6 +40,13 @@ class EvidenceInput(BaseModel):
     period_end: datetime
     stream: Literal["domestic", "foreign", "manual"] | None = None
     limit: int = Field(default=12, ge=1, le=20)
+
+
+class AssistantInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action: AssistantRequestAction
+    evidence: EvidenceInput
+    report_slot: int | None = Field(default=None, ge=1, le=4, strict=True)
 
 
 class DailyReportInput(BaseModel):
@@ -216,6 +229,45 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "mode": "bounded_draft", "result": result,
                 "evidence": [item.reference() for item in bundle.evidence], "bounded": bundle.bounded}
+
+    @router.get("/assistant")
+    def assistant_catalog(request: Request, response: Response,
+                          principal: Principal = Depends(principal_dep),
+                          services: Services = Depends(services_dep)) -> dict[str, Any]:
+        # Only authenticated newsroom principals with current archive access
+        # and a usable analysis grant receive a catalog. No studio registration
+        # or subscription grants are recognized here.
+        authorize(services, principal, resource_type="archive", resource_id="default",
+                  action="search", correlation_id=correlation_id(request))
+        available = [
+            {"action": tool.action, "label": tool.label, "description": tool.description}
+            for tool in TOOLS
+            if decide_access(principal.subject_id, principal.role, "analysis_workspace",
+                             "default", tool.grant, services.grants)["allowed"] is True
+            and (tool.action != "public_report" or services.switches().enabled(PUBLIC_ANALYSIS))
+        ]
+        if not available:
+            raise APIError(ErrorCode.FORBIDDEN)
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "product": identity(), "tools": available}
+
+    @router.post("/assistant")
+    def assistant_execute(payload: AssistantInput, request: Request, response: Response,
+                          principal: Principal = Depends(principal_dep),
+                          services: Services = Depends(services_dep)) -> dict[str, Any]:
+        # Resolve only the bounded local action registry; never execute a URL,
+        # arbitrary function name or instructions found in source documents.
+        action = select_action(payload.action, payload.evidence.query)
+        if action == "public_report":
+            if payload.report_slot is None:
+                raise APIError(ErrorCode.CONTRACT_INVALID)
+            result = report(payload.report_slot, payload.evidence, request, response, principal, services)
+        else:
+            if payload.report_slot is not None:
+                raise APIError(ErrorCode.CONTRACT_INVALID)
+            handler = {"research": chat, "analysis": run}[action]
+            result = handler(payload.evidence, request, response, principal, services)
+        return {**result, "assistant_action": action}
 
     def report_access(slot: int, request: Request, principal: Principal, services: Services) -> None:
         corr = correlation_id(request)
