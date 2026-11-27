@@ -1,0 +1,32 @@
+diff --git a/backend/modules/editorial/api.py b/backend/modules/editorial/api.py
+index bb889ab..59ce9fa 100644
+--- a/backend/modules/editorial/api.py
++++ b/backend/modules/editorial/api.py
+@@ -157,7 +157,12 @@ def build_router(
+             previous = saved["source_snapshot"]
+             if previous["source_id"] != raw["source_id"] or previous["content_scope"] != raw["content_scope"]:
+                 raise APIError(ErrorCode.FORBIDDEN)
+-        latest = services.editorial.get(news_id)
++        # For the editable latest view, the concurrency token must come from
++        # the exact revision returned to the editor.  A second read here can
++        # race with another writer and would let an unseen revision be
++        # overwritten. Historical views are read-only, so they may report the
++        # current head separately.
++        latest = saved if version is None else services.editorial.get(news_id)
+         response.headers["Cache-Control"] = "no-store"
+         return {"schema_version": "1.0", "source": raw, "source_hash": digest(canonical(raw)),
+                 "desks": desks, "latest_version": latest["version"] if latest else 0,
+diff --git a/backend/tests/test_migrations_postgresql.py b/backend/tests/test_migrations_postgresql.py
+index 3d68d0e..b32aff3 100644
+--- a/backend/tests/test_migrations_postgresql.py
++++ b/backend/tests/test_migrations_postgresql.py
+@@ -604,6 +604,9 @@ def _exercise_editorial_workspace(central):
+             assert second["version"] == 2 and second["article"]["status"] == "held"
+             assert "FACT_NUMBER_MISMATCH" in second["translation"]["warnings"]
+             assert "DIRECT_QUOTE_MISMATCH" in second["translation"]["warnings"]
++            current = client.get(path, headers=headers).json()
++            assert current["saved"] == second
++            assert current["latest_version"] == current["saved"]["version"]
+             old = client.get(path + "?version=1", headers=headers).json()
+             assert old["saved"] == saved and old["latest_version"] == 2
+             assert [r["version"] for r in old["history"]] == [2, 1]
