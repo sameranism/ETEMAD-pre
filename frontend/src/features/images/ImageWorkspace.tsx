@@ -108,6 +108,27 @@ export default function ImageWorkspace({ token, newsId, version, editable }:
         error instanceof Error && error.message === "denied" ? "مجوز آماده‌سازی تصویر ندارید." : "آماده‌سازی تصویر ناموفق بود.");
     } finally { if (!controller.signal.aborted) setBusy(false); }
   }
+  async function prepareAutomatically() {
+    if (!editable || busy) return;
+    const controller = new AbortController(); active.current = controller;
+    setBusy(true); setMessage(""); clearPreview();
+    try {
+      const response = await fetch(path + "/auto", {
+        method: "POST", signal: controller.signal, credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ article_version: version }),
+      });
+      if (response.status === 409) throw new Error("stale");
+      if (response.status === 401 || response.status === 403) throw new Error("denied");
+      if (!response.ok) throw new Error("unavailable");
+      await load(controller);
+      if (!controller.signal.aborted) setMessage("سه کارت خبری از عنوان نسخه ذخیره شد؛ این خروجی عکس واقعی رویداد نیست.");
+    } catch (error) {
+      if (!controller.signal.aborted) setMessage(error instanceof Error && error.message === "stale"
+        ? "ابتدا آخرین نسخه مقاله را بارگیری کنید." :
+        error instanceof Error && error.message === "denied" ? "مجوز آماده‌سازی تصویر ندارید." : "ساخت کارت خبری در دسترس نیست.");
+    } finally { if (!controller.signal.aborted) setBusy(false); }
+  }
   async function show(row: Rendition, index: number, asset: Asset) {
     if (busy) return;
     const controller = new AbortController(); active.current = controller;
@@ -129,6 +150,9 @@ export default function ImageWorkspace({ token, newsId, version, editable }:
   return <section className="news-item grid gap-3" aria-label="آماده‌سازی تصویر">
     <h3>نگار · تصویر نسخه {version.toLocaleString("fa-IR")}</h3>
     <p>خروجی‌های افقی، مربعی و عمودی؛ بدون لوگوی فرضی و بدون مجوز انتشار خودکار.</p>
+    {editable && <button type="button" disabled={busy} onClick={() => void prepareAutomatically()}>
+      ساخت خودکار کارت خبری از عنوان (بدون آپلود)
+    </button>}
     {editable && <form className="grid gap-2" onSubmit={prepare}>
       <fieldset disabled={busy} className="grid gap-2">
         <label>تصویر (JPEG، PNG یا WebP تا ۸ مگابایت)

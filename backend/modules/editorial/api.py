@@ -20,6 +20,7 @@ from backend.modules.editorial.image_processor import (
     ImageUnavailable,
     prepare_image,
 )
+from backend.modules.editorial.news_card import prepare_news_card
 from backend.modules.editorial.quality import assess_quality
 from backend.modules.editorial.repository import FIELDS, RevisionConflict
 from backend.modules.editorial.translator import canonical, checked_source, digest
@@ -52,6 +53,11 @@ class ManualDraftInput(GenerateDraftInput):
     body: str = Field(min_length=1, max_length=60_000)
     short_summary: str = Field(min_length=1, max_length=60_000)
     translated_text: str | None = Field(default=None, max_length=60_000)
+
+
+class AutoImageInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    article_version: int = Field(ge=1, lt=2**31)
 
 
 class ImageInput(BaseModel):
@@ -316,6 +322,34 @@ def build_router(
         except ImageUnavailable:
             raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE) from None
         except (ValueError, binascii.Error):
+            raise APIError(ErrorCode.CONTRACT_INVALID) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "saved": result}
+
+    @router.post("/news/{news_id}/images/auto")
+    def auto_images(
+        news_id: str, payload: AutoImageInput, request: Request, response: Response,
+        principal: Any = Depends(principal_dep), services: Any = Depends(services_dep),
+    ) -> dict[str, Any]:
+        _authorize_workspace(services, principal, request, news_id, "write")
+        _authorize_workspace(services, principal, request, news_id, "prepare_image")
+        saved = _image_revision(services, news_id, payload.article_version)
+        latest = services.editorial.get(news_id)
+        if latest is None or latest["version"] != saved["version"]:
+            raise APIError(ErrorCode.CONFLICT)
+        try:
+            prepared = prepare_news_card(saved["article"], objects=services.objects)
+            _authorize_workspace(services, principal, request, news_id, "write")
+            _authorize_workspace(services, principal, request, news_id, "prepare_image")
+            _image_revision(services, news_id, payload.article_version)
+            latest = services.editorial.get(news_id)
+            if latest is None or latest["version"] != saved["version"]:
+                raise APIError(ErrorCode.CONFLICT)
+            result = services.images.save(saved["article"], saved["version"], prepared,
+                                          actor_id=principal.subject_id)
+        except ImageUnavailable:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE) from None
+        except ValueError:
             raise APIError(ErrorCode.CONTRACT_INVALID) from None
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "saved": result}
