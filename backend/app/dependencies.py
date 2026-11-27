@@ -54,6 +54,7 @@ from backend.modules.domestic.scheduler import (
     PostgresScheduleStore,
     ScheduleStore,
 )
+from backend.modules.editorial.generation import EditorialGenerator
 from backend.modules.editorial.repository import EditorialRepository
 from backend.modules.processing.repository import PostgresProcessingRepository, ProcessingRepository
 
@@ -80,6 +81,7 @@ class Services:
     accounts: PostgresAccountStore | None = None
     foreign_workflow: ForeignWorkflow | None = None
     editorial: EditorialRepository | None = None
+    editorial_generator: EditorialGenerator | None = None
     news_archive: PostgresNewsArchive | None = None
     orchestrator: Orchestrator = field(init=False)
 

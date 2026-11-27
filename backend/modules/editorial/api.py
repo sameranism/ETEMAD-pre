@@ -7,6 +7,7 @@ from typing import Any, Callable, Literal
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 from pydantic import BaseModel, Field
 
+from backend.core.ai_gateway import BudgetExceeded, GatewayDisabled, UnknownTask
 from backend.core.errors import APIError, ErrorCode
 from backend.core.sources_service import SourceNotAllowed, SourceNotFound
 from backend.modules.editorial.glossary import EditorialGlossary
@@ -30,10 +31,13 @@ class EditorialPreviewInput(BaseModel):
     claim_evidence: dict[str, list[str]] = Field(default_factory=dict, max_length=50)
 
 
-class ManualDraftInput(BaseModel):
+class GenerateDraftInput(BaseModel):
     expected_version: int = Field(ge=0, lt=2**31-1)
     source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     desk: str = Field(min_length=1, max_length=64)
+
+
+class ManualDraftInput(GenerateDraftInput):
     title: str = Field(min_length=1, max_length=60_000)
     lead: str = Field(min_length=1, max_length=60_000)
     body: str = Field(min_length=1, max_length=60_000)
@@ -163,11 +167,14 @@ def build_router(
         # overwritten. Historical views are read-only, so they may report the
         # current head separately.
         latest = saved if version is None else services.editorial.get(news_id)
+        generator = services.editorial_generator
+        ai_desks = [desk for desk in desks if generator is not None and generator.available(raw, desk)]
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "source": raw, "source_hash": digest(canonical(raw)),
                 "desks": desks, "latest_version": latest["version"] if latest else 0,
                 "saved": saved, "history": services.editorial.history(news_id, before=before),
-                "mode": "manual", "ai_available": False}
+                "mode": "manual", "ai_available": bool(ai_desks), "ai_desks": ai_desks,
+                "generation_mode": generator.mode if ai_desks else None}
 
     @router.put("/news/{news_id}/draft")
     def put_draft(
@@ -190,6 +197,45 @@ def build_router(
             )
         except RevisionConflict:
             raise APIError(ErrorCode.CONFLICT) from None
+        except ValueError:
+            raise APIError(ErrorCode.CONTRACT_INVALID) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "saved": result}
+
+    @router.post("/news/{news_id}/generate")
+    def generate_draft(
+        news_id: str, payload: GenerateDraftInput, request: Request, response: Response,
+        request_id: str = Header(alias="Idempotency-Key", min_length=1, max_length=128),
+        principal: Any = Depends(principal_dep), services: Any = Depends(services_dep),
+    ) -> dict[str, Any]:
+        _authorize_workspace(services, principal, request, news_id, "write")
+        _authorize_workspace(services, principal, request, news_id, "generate")
+        raw, desks = _source(services, news_id)
+        generator = services.editorial_generator
+        if payload.desk not in desks:
+            raise APIError(ErrorCode.CONTRACT_INVALID)
+        if services.editorial is None or generator is None or not generator.available(raw, payload.desk):
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+
+        def revalidate() -> None:
+            _authorize_workspace(services, principal, request, news_id, "write")
+            _authorize_workspace(services, principal, request, news_id, "generate")
+            current, current_desks = _source(services, news_id)
+            if digest(canonical(current)) != payload.source_hash or payload.desk not in current_desks:
+                raise RevisionConflict("source changed")
+
+        try:
+            result = services.editorial.save_generated(
+                raw, desk=payload.desk, generator=generator, expected_version=payload.expected_version,
+                expected_source_hash=payload.source_hash, request_id=request_id,
+                actor_id=principal.subject_id, revalidate=revalidate,
+            )
+        except RevisionConflict:
+            raise APIError(ErrorCode.CONFLICT) from None
+        except BudgetExceeded:
+            raise APIError(ErrorCode.RATE_LIMITED) from None
+        except (GatewayDisabled, UnknownTask):
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE) from None
         except ValueError:
             raise APIError(ErrorCode.CONTRACT_INVALID) from None
         response.headers["Cache-Control"] = "no-store"

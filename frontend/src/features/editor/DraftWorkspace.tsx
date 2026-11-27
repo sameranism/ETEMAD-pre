@@ -6,13 +6,15 @@ type Fields = { title: string; lead: string; body: string; short_summary: string
 type Saved = {
   version: number; source_hash: string; source_snapshot: { original_title: string; original_text: string };
   article: Fields & { desk: string; status: "draft" | "held" };
-  translation: { translated_text: string } | null; quality: { passed: boolean; reason_codes: string[] };
+  translation: { translated_text: string; model_id?: string; warnings?: string[] } | null;
+  quality: { passed: boolean; reason_codes: string[]; generation?: { mode: "fixture" | "live"; warnings: string[] } };
   policy: { decision: string; reason_codes: string[] };
 };
 type Workspace = {
   source: { news_id: string; original_title: string; original_text: string; language: string; stream: string };
   source_hash: string; desks: string[]; latest_version: number; saved: Saved | null;
   history: { version: number; source_hash: string; created_at: string }[];
+  ai_available?: boolean; ai_desks?: string[]; generation_mode?: "fixture" | "live" | null;
 };
 const blank: Fields = { title: "", lead: "", body: "", short_summary: "" };
 const keys = ["title", "lead", "body", "short_summary"] as const;
@@ -31,6 +33,8 @@ export function parseWorkspace(value: unknown, newsId: string): Workspace {
       !object(value.source) || value.source.news_id !== newsId || !hash(value.source_hash) ||
       !["original_title", "original_text", "language", "stream"].every(k => typeof (value.source as Record<string, unknown>)[k] === "string") ||
       !strings(value.desks) || !value.desks.length || !version(value.latest_version) ||
+      (value.ai_available === true && (!strings(value.ai_desks) || !value.ai_desks.length ||
+        !["fixture", "live"].includes(String(value.generation_mode)))) ||
       !Array.isArray(value.history) || !value.history.every(row => object(row) && version(row.version) &&
         row.version > 0 && hash(row.source_hash) && typeof row.created_at === "string")) {
     throw new Error("Invalid workspace");
@@ -47,6 +51,9 @@ export function parseWorkspace(value: unknown, newsId: string): Workspace {
       (saved.translation !== null && (!object(saved.translation) || saved.translation.news_id !== newsId ||
         typeof saved.translation.translated_text !== "string")) ||
       !object(saved.quality) || typeof saved.quality.passed !== "boolean" || !strings(saved.quality.reason_codes) ||
+      (saved.quality.generation !== undefined && (!object(saved.quality.generation) ||
+        !["fixture", "live"].includes(String(saved.quality.generation.mode)) ||
+        !strings(saved.quality.generation.warnings))) ||
       !object(saved.policy) || !["blocked", "human_review"].includes(String(saved.policy.decision)) ||
       !strings(saved.policy.reason_codes))) throw new Error("Invalid saved revision");
   return value as unknown as Workspace;
@@ -130,6 +137,36 @@ export default function DraftWorkspace({ token, items }: { token: string; items:
       if (!controller.signal.aborted) setMessage("ذخیره تأیید نشد. متن حفظ شده؛ دوباره تلاش کنید.");
     } finally { if (!controller.signal.aborted) setBusy(false); }
   }
+  async function generate() {
+    if (!workspace || busy || viewVersion !== null || !workspace.ai_desks?.includes(desk)) return;
+    if (dirty && !window.confirm("تغییرات ذخیره نشده کنار گذاشته شود و پیش‌نویس جدید ساخته شود؟")) return;
+    const payload = JSON.stringify({ desk, expected_version: workspace.latest_version, source_hash: workspace.source_hash });
+    const retryPayload = "generate:" + payload;
+    if (retry.current?.payload !== retryPayload) retry.current = { payload: retryPayload, key: crypto.randomUUID() };
+    const controller = new AbortController(); request.current = controller;
+    setBusy(true); setMessage("");
+    try {
+      const response = await fetch(path.replace(/\/draft$/, "/generate"), {
+        method: "POST", signal: controller.signal, credentials: "same-origin", cache: "no-store",
+        redirect: "error", headers: { ...headers, "Content-Type": "application/json", "Idempotency-Key": retry.current.key },
+        body: payload,
+      });
+      if (controller.signal.aborted) return;
+      if (response.status === 409) {
+        setMessage("نسخه یا منبع تغییر کرده است. آخرین نسخه را بارگیری کنید."); return;
+      }
+      if (response.status === 403) {
+        setMessage("مجوز تولید خودکار این خبر وجود ندارد."); return;
+      }
+      if (response.status === 503) {
+        setMessage("مدل یا قواعد معتبر این سرویس در دسترس نیست."); return;
+      }
+      if (!response.ok) throw new Error("generation failed");
+      setDirty(false); retry.current = null; setReload(v => v + 1);
+    } catch {
+      if (!controller.signal.aborted) setMessage("تولید خودکار تأیید نشد؛ متن فعلی حفظ شده است.");
+    } finally { if (!controller.signal.aborted) setBusy(false); }
+  }
   const staleSource = workspace?.saved && workspace.saved.source_hash !== workspace.source_hash;
   const displayedSource = viewVersion !== null ? workspace?.saved?.source_snapshot : workspace?.source;
   return (
@@ -171,6 +208,11 @@ export default function DraftWorkspace({ token, items }: { token: string; items:
                   {workspace.desks.map(d => <option key={d}>{d}</option>)}
                 </select>
               </label>
+              {workspace.ai_available && workspace.ai_desks?.includes(desk) ? (
+                <button type="button" onClick={() => void generate()}>
+                  {workspace.generation_mode === "fixture" ? "تولید نمونه آزمایشی و ذخیره" : "ترجمه و تدوین هوشمند و ذخیره"}
+                </button>
+              ) : <p>تولید هوشمند برای این سرویس هنوز فعال نیست.</p>}
               {workspace.source.stream === "foreign" && workspace.source.language !== "fa" &&
                 <TranslatorWorkspace sourceLanguage={workspace.source.language} value={translation}
                   disabled={busy || viewVersion !== null} onChange={value => { setTranslation(value); setDirty(true); }} />}
@@ -182,7 +224,11 @@ export default function DraftWorkspace({ token, items }: { token: string; items:
             {workspace.saved && <div>
               <p>نسخه ذخیره‌شده: {workspace.saved.version} · {workspace.saved.article.status === "held" ? "متوقف" : "پیش‌نویس"}</p>
               <p>کنترل قطعی: {workspace.saved.quality.reason_codes.join("، ")}</p>
-              {workspace.saved.translation && <p>ترجمه دستی ذخیره شده است؛ نیازمند بررسی معنایی.</p>}
+              {workspace.saved.translation && <p>ترجمه ذخیره شده است ({workspace.saved.translation.model_id ?? "ثبت دستی"})؛ نیازمند بررسی معنایی.</p>}
+              {workspace.saved.quality.generation && <div>
+                <p>{workspace.saved.quality.generation.mode === "fixture" ? "خروجی آزمایشی، نه ترجمه واقعی" : "پیش‌نویس تولیدشده با مدل"}</p>
+                <p>{workspace.saved.quality.generation.warnings.join("، ")}</p>
+              </div>}
               <p>مجوز انتشار صادر نشده است: {workspace.saved.policy.reason_codes.join("، ")}</p>
             </div>}
           </form>
