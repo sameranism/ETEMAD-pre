@@ -129,9 +129,18 @@ def _workbench(s: Any, p: Principal, *, desk: str | None = None,
             "capabilities": _capabilities(s, p)}
 
 
-def _owner(services: Any, p: Principal) -> dict[str, Any]:
+def _owner(services: Any, p: Principal, authorize: Callable[..., None],
+           request_id: str) -> dict[str, Any]:
     data: dict[str, Any] = {}
-    if _allowed(services, p, "operations", "default", "read"):
+
+    def permitted(kind: str, identity: str, action: str = "read") -> bool:
+        if not _allowed(services, p, kind, identity, action):
+            return False
+        authorize(services, p, resource_type=kind, resource_id=identity,
+                  action=action, correlation_id=request_id)
+        return True
+
+    if permitted("operations", "default"):
         health = {}
         for role in ("central", "domestic", "foreign"):
             try:
@@ -141,13 +150,28 @@ def _owner(services: Any, p: Principal) -> dict[str, Any]:
                 health[role] = "unavailable"
         data["health"] = health
         data["workflow_counts"] = services.workflow_jobs.counts() if services.workflow_jobs is not None else None
-    if _allowed(services, p, "source_registry", "default", "read"):
+    if permitted("source_registry", "default"):
         sources = services.sources.list()
-        domestic = {x["source_id"]: x for x in services.pipeline.poll_states.all()}
-        foreign = {}
-        if (services.foreign_workflow is not None
-                and _allowed(services, p, "foreign_monitor", "default", "read")):
-            foreign = {x["source_id"]: x for x in services.foreign_workflow.status(limit=200)["polls"]}
+        monitoring = {"domestic": "ok", "foreign": "not_authorized"}
+        try:
+            domestic = {x["source_id"]: x for x in services.pipeline.poll_states.all()}
+        except Exception:
+            domestic = {}
+            monitoring["domestic"] = "unavailable"
+        foreign: dict[str, Any] = {}
+        foreign_authorized = permitted("foreign_monitor", "default")
+        if foreign_authorized:
+            if services.foreign_workflow is None:
+                monitoring["foreign"] = "unavailable"
+            else:
+                try:
+                    foreign = {
+                        x["source_id"]: x
+                        for x in services.foreign_workflow.status(limit=200)["polls"]
+                    }
+                    monitoring["foreign"] = "ok"
+                except Exception:
+                    monitoring["foreign"] = "unavailable"
         rows = []
         for source in sources[:200]:
             poll = (domestic if source["stream"] == "domestic" else foreign).get(source["source_id"])
@@ -156,21 +180,21 @@ def _owner(services: Any, p: Principal) -> dict[str, Any]:
                          "last_success_at": poll["last_success_at"] if poll else None,
                          "consecutive_failures": poll["consecutive_failures"] if poll else None})
         data["sources"] = {"registered": len(sources), "enabled": sum(x["enabled"] for x in sources),
-                           "items": rows, "scan_limit": 200}
-        data["foreign_monitor"] = _allowed(services, p, "foreign_monitor", "default", "read")
-    if _allowed(services, p, "config", "schedule_config:domestic:SCH-DOMESTIC-INGEST", "read"):
+                           "items": rows, "scan_limit": 200, "monitoring": monitoring}
+        data["foreign_monitor"] = foreign_authorized
+    if permitted("config", "schedule_config:domestic:SCH-DOMESTIC-INGEST"):
         data["schedule"] = True
-    if _allowed(services, p, "config", CONFIG, "read"):
+    if permitted("config", CONFIG):
         data["controls"] = _controls(services, p)
-    if _allowed(services, p, "publication_workspace", "default", "read"):
+    if permitted("publication_workspace", "default"):
         data["publishing"] = True
-    if _allowed(services, p, "ai_cost", "default", "read"):
+    if permitted("ai_cost", "default"):
         cost = (PostgresCostLedger(services.registry.engine("central")).committed_usd()
                 if services.workflow_jobs is not None else None)
         data["ai_cost"] = {"committed_usd": cost,
                            "period": datetime.now(timezone.utc).strftime("%Y-%m"),
                            "basis": "ledger_estimate_utc_month"}
-    if _allowed(services, p, "audit", "default", "read"):
+    if permitted("audit", "default"):
         sink = services.audit_sink
         if isinstance(sink, PostgresAuditSink):
             data["audit"] = sink.recent_operations()
@@ -181,7 +205,6 @@ def _owner(services: Any, p: Principal) -> dict[str, Any]:
                              if x.resource_type in {"identity", "config", "source_registry",
                                                     "operations", "publication_workspace"}][:20]
     return data
-
 
 def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..., Any],
                  authorize: Callable[..., None], correlation_id: Callable[[Request], str]) -> APIRouter:
@@ -197,11 +220,12 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
         return {"schema_version": "1.0", "role": p.role}
 
     @router.get("/owner-dashboard")
-    def owner(response: Response, p: Principal = Depends(principal_dep),
+    def owner(request: Request, response: Response, p: Principal = Depends(principal_dep),
               services: Any = Depends(services_dep)) -> dict[str, Any]:
         _role(p, "owner")
         response_headers(response)
-        return {"schema_version": "1.0", "role": "owner", "operations": _owner(services, p)}
+        return {"schema_version": "1.0", "role": "owner",
+                "operations": _owner(services, p, authorize, correlation_id(request))}
 
     @router.put("/owner-dashboard/output-controls")
     def output_control(payload: OutputChange, request: Request, response: Response,
