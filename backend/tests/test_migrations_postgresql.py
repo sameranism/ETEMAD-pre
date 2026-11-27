@@ -996,6 +996,7 @@ def _exercise_editorial_workspace(central):
             assert client.post(generation_path, headers=gh, json=generate).json()["saved"] == generated
             assert provider.calls == ["fixture-translation", "fixture-editorial"]
             from backend.app.workflow_worker import WorkflowWorker
+            from backend.core.audit import InMemoryAuditSink
 
             # The worker must consume actual outbox jobs, not an injected fake queue.
             # Isolate this worker run from earlier synthetic processing fixtures.
@@ -1007,16 +1008,15 @@ def _exercise_editorial_workspace(central):
             assert worker.run_one(project="P12", stream="foreign") == "held"
             assert services.editorial.get(denied_raw["news_id"]) is None
             assert len(provider.calls) == 2
-            with services.registry.engine("central").connect() as conn:
-                denied_audit = conn.execute(text("""
-                    SELECT actor_id, action, decision, correlation_id
-                    FROM audit.audit_entries WHERE resource_id = :news_id
-                    ORDER BY occurred_at, audit_id
-                """), {"news_id": denied_raw["news_id"]}).mappings().all()
-            assert [(row["actor_id"], row["action"], row["decision"]) for row in denied_audit] == [
+            assert isinstance(services.audit_sink, InMemoryAuditSink)
+            denied_audit = [
+                entry for entry in services.audit_sink.entries()
+                if entry.resource_id == denied_raw["news_id"]
+            ]
+            assert [(entry.actor_id, entry.action, entry.decision) for entry in denied_audit] == [
                 (principal.subject_id, "newsroom.read", "DENY_DEFAULT"),
             ]
-            assert denied_audit[0]["correlation_id"].startswith("workflow:")
+            assert denied_audit[0].correlation_id.startswith("workflow:")
             services.pipeline.process(new_raw)
             for resource, action in (("newsroom", "read"), ("editorial_workspace", "write"),
                                      ("editorial_workspace", "generate")):
@@ -1031,12 +1031,11 @@ def _exercise_editorial_workspace(central):
             assert services.workflow_jobs.counts() == {"held": 1, "done": 1}
             assert worker.run_one(project="P12", stream="foreign") == "empty"
             assert len(provider.calls) == 4
-            with services.registry.engine("central").connect() as conn:
-                allowed_audit = conn.execute(text("""
-                    SELECT DISTINCT actor_id, action, decision
-                    FROM audit.audit_entries WHERE resource_id = :news_id
-                """), {"news_id": new_raw["news_id"]}).mappings().all()
-            assert {(row["actor_id"], row["action"], row["decision"]) for row in allowed_audit} == {
+            allowed_audit = [
+                entry for entry in services.audit_sink.entries()
+                if entry.resource_id == new_raw["news_id"]
+            ]
+            assert {(entry.actor_id, entry.action, entry.decision) for entry in allowed_audit} == {
                 (principal.subject_id, "newsroom.read", "ROLE_ALLOWED"),
                 (principal.subject_id, "editorial_workspace.write", "ROLE_ALLOWED"),
                 (principal.subject_id, "editorial_workspace.generate", "ROLE_ALLOWED"),
