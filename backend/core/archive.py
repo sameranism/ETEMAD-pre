@@ -209,6 +209,23 @@ class PostgresNewsArchive:
                      "published_at": row["published_at"].isoformat() if row["published_at"] else None}
                     for row in rows]
 
+    def candidates_in_period(self, *, start: datetime, end: datetime,
+                             stream: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        if (start.tzinfo is None or end.tzinfo is None or start >= end
+                or stream not in {None, "domestic", "foreign", "manual"} or not 1 <= limit <= 100):
+            raise ValueError("invalid archive period")
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT news_id,stream,source_id,title,original_url,published_at,received_at
+                FROM archive.news_records
+                WHERE classification='internal' AND received_at >= :start AND received_at < :end
+                  AND (CAST(:stream AS text) IS NULL OR stream=:stream)
+                ORDER BY received_at DESC, news_id LIMIT :limit
+            """), {"start": start, "end": end, "stream": stream, "limit": limit}).mappings()
+            return [{**dict(row), "received_at": row["received_at"].isoformat(),
+                     "published_at": row["published_at"].isoformat() if row["published_at"] else None}
+                    for row in rows]
+
     def versions(self, news_id: str) -> list[dict[str, Any]]:
         with self._engine.connect() as conn:
             rows = conn.execute(text("""
