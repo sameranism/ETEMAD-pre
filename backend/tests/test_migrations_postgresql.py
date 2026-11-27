@@ -68,7 +68,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 21
+            assert len(central_tables) == 22
+            assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
@@ -84,7 +85,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights"} and row != ("identity", "login_throttle")
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -131,6 +132,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_image_workspace(central)
             _exercise_analysis_workspace()
             _exercise_publication_queue(central)
+            _exercise_ai_cost_ledger()
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -1036,3 +1038,67 @@ def _exercise_publication_queue(central):
             command.downgrade(central, "009_image_assets")
     finally:
         registry.dispose()
+
+
+
+def _exercise_ai_cost_ledger():
+    from backend.core.ai_cost_ledger import PostgresCostLedger
+    from backend.core.ai_gateway import BudgetExceeded, FakeProvider, Gateway, ModelBinding
+
+    registry = DatabaseRegistry()
+    other_registry = DatabaseRegistry()
+    try:
+        ledger = PostgresCostLedger(registry.engine("central"))
+        other = PostgresCostLedger(other_registry.engine("central"))
+        binding = ModelBinding("translation", "fake", "fixture", run_budget_usd=.01, daily_budget_usd=.004)
+        calls = []
+
+        class RecordingProvider(FakeProvider):
+            def complete(self, prompt, *, model, timeout_s):
+                calls.append(1)
+                return super().complete(prompt, model=model, timeout_s=timeout_s)
+
+        provider = RecordingProvider(cost_per_call=.002)
+        first = Gateway({"translation": binding}, {"fake": provider}, enabled=True,
+                        monthly_budget_usd=.006, cost_ledger=ledger)
+        restarted = Gateway({"translation": binding}, {"fake": provider}, enabled=True,
+                            monthly_budget_usd=.006, cost_ledger=other)
+        result = first.call("translation", "fixture prompt")
+        assert result.cost_usd == .002
+        assert restarted.spent_usd == pytest.approx(.002)
+        pending = str(uuid4())
+        other.reserve(pending, binding, .002, monthly_budget_usd=.006)
+        with pytest.raises(BudgetExceeded):
+            restarted.call("translation", "must not dispatch")
+        assert calls == [1]
+        other.settle(pending, "released")
+        assert restarted.call("translation", "second").cost_usd == .002
+        task2 = ModelBinding("editorial", "fake", "fixture", run_budget_usd=.01, daily_budget_usd=.01)
+        candidates = [str(uuid4()), str(uuid4())]
+
+        def attempt(request_id):
+            try:
+                PostgresCostLedger(registry.engine("central")).reserve(
+                    request_id, task2, .002, monthly_budget_usd=.006)
+                return True
+            except BudgetExceeded:
+                return False
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(attempt, candidates))
+        assert outcomes.count(True) == 1
+        winner = candidates[outcomes.index(True)]
+        ledger.settle(winner, "unknown")
+        ledger.settle(winner, "unknown")
+        with pytest.raises(ValueError):
+            ledger.settle(winner, "released")
+        with pytest.raises(BudgetExceeded):
+            other.reserve(str(uuid4()), task2, .001, monthly_budget_usd=.006)
+        assert ledger.committed_usd() == pytest.approx(.006)
+        with registry.engine("central").connect() as conn:
+            rows = conn.execute(text("SELECT request_id,state FROM control.ai_cost_reservations")).all()
+            assert (result.request_id, "confirmed") in rows
+            assert (winner, "unknown") in rows
+    finally:
+        registry.dispose()
+        other_registry.dispose()
