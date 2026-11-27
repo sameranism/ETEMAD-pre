@@ -44,6 +44,8 @@ class TelegramAdapter:
     def __init__(self, adapter_id: str, config: Mapping[str, Any], secrets: SecretStore,
                  *, authorized: Callable[[], bool] | None = None,
                  transport: Transport = _send) -> None:
+        if not adapter_id.strip():
+            raise ValueError("explicit adapter identity required")
         self.adapter_id = adapter_id
         self._secrets = secrets
         self._authorized = authorized or (lambda: False)
@@ -61,6 +63,10 @@ class TelegramAdapter:
                 or not config["credential_ref"]):
             raise ValueError("Telegram destination is not verified")
         validate_ref(str(config["credential_ref"]))
+        if hasattr(self, "_destination_id") and (
+                config["destination_id"], config["address"], config["credential_ref"]
+        ) != (self._destination_id, self._chat_id, self._credential_ref):
+            raise ValueError("destination binding changed")
 
     def dry_run(self, payload: Mapping[str, Any]) -> None:
         validate_payload("destination_payload", payload)
@@ -83,6 +89,8 @@ class TelegramAdapter:
             return Delivery("skipped", error_code="LIVE_NOT_AUTHORIZED")
         try:
             status, body = self._transport(token, {"chat_id": self._chat_id, "text": payload["text"]})
+            if len(body) > _MAX_RESPONSE:
+                raise ValueError("provider response exceeds bound")
             parsed = json.loads(body)
             if not isinstance(parsed, dict):
                 raise ValueError("invalid provider response")

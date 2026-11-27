@@ -132,6 +132,7 @@ class EditorialRepository:
         self, raw: Mapping[str, Any], *, desk: str, generator: EditorialGenerator,
         expected_version: int, expected_source_hash: str, request_id: str, actor_id: str,
         revalidate: Callable[[], None],
+        on_commit: Callable[[Connection], None] | None = None,
     ) -> dict[str, Any]:
         source = checked_source(raw)
         source_hash = digest(canonical(source))
@@ -150,7 +151,7 @@ class EditorialRepository:
             # The replay and version checks happen before the model is invoked.
             # Only trusted application composition supplies the gateway.
             revalidate()
-            result = generator.generate(source, desk=desk)
+            result = generator.generate(source, desk=desk, revalidate=revalidate)
             revalidate()
             article = dict(result.article.record)
             original = source["original_text"]
@@ -181,7 +182,7 @@ class EditorialRepository:
 
         return self._write(
             source, desk=desk, expected_version=expected_version, request_id=request_id,
-            request_hash=request_hash, actor_id=actor_id, prepare=prepare,
+            request_hash=request_hash, actor_id=actor_id, prepare=prepare, on_commit=on_commit,
         )
 
     def _write(
@@ -189,6 +190,7 @@ class EditorialRepository:
         request_hash: str, actor_id: str,
         prepare: Callable[[], tuple[dict[str, Any], dict[str, Any], dict[str, Any],
                                     dict[str, Any] | None, dict[str, Any]]],
+        on_commit: Callable[[Connection], None] | None = None,
     ) -> dict[str, Any]:
         news_id = source["news_id"]
         source_hash = digest(canonical(source))
@@ -203,6 +205,8 @@ class EditorialRepository:
                     raise RevisionConflict("conflicting replay")
                 replay = self._read(conn, news_id, previous.version)
                 assert replay is not None
+                if on_commit is not None:
+                    on_commit(conn)
                 return replay
             latest = self._read(conn, news_id)
             if (latest["version"] if latest else 0) != expected_version:
@@ -231,4 +235,6 @@ class EditorialRepository:
                    "tid": translation["translation_id"] if translation else None})
             result = self._read(conn, news_id, expected_version + 1)
             assert result is not None
+            if on_commit is not None:
+                on_commit(conn)
             return result

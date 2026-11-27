@@ -5,6 +5,8 @@ a retrieval source. No network or AI provider is enabled by this composition.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any, Callable, Literal, Mapping
 
@@ -28,6 +30,7 @@ from backend.modules.intelligence.assistant import (
 from backend.modules.intelligence.chat import answer_question
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
 from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
+from backend.modules.intelligence.metrics import MetricResult, compute_metrics
 from backend.modules.intelligence.private_reports import PRIVATE_SLOTS, build_private_report
 from backend.modules.intelligence.public_reports import PUBLIC_SLOTS, build_public_report
 from backend.modules.intelligence.repository import ExecutiveStorageUnavailable
@@ -63,8 +66,16 @@ class MemoryInput(BaseModel):
     stream: Literal["all", "domestic", "foreign"]
 
 
+class MetricInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    period_start: datetime
+    period_end: datetime
+    stream: Literal["mixed", "domestic", "foreign", "manual"] = "mixed"
+
+
 def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..., Any],
                  authorize: Callable[..., None], correlation_id: Callable[[Request], str]) -> APIRouter:
+    root = APIRouter(tags=["analysis"])
     router = APIRouter(prefix="/analysis", tags=["analysis"])
 
     def bundle_for(payload: EvidenceInput, request: Request, principal: Principal,
@@ -364,4 +375,134 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
         return {"schema_version": "1.0", "slot": slot, "mode": "bounded_daily_draft",
                 "saved": saved, "bounded": True}
 
-    return router
+    def metric_access(request: Request, principal: Principal, services: Services) -> None:
+        corr = correlation_id(request)
+        authorize(services, principal, resource_type="analysis_workspace", resource_id="default",
+                  action="metrics", correlation_id=corr)
+        authorize(services, principal, resource_type="archive", resource_id="default",
+                  action="search", correlation_id=corr)
+
+    def digest(value: Any) -> str:
+        data = json.dumps(value, ensure_ascii=False, sort_keys=True,
+                          separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+    def measured(payload: MetricInput, request: Request,
+                 principal: Principal, services: Services) -> MetricResult:
+        metric_access(request, principal, services)
+        if services.news_archive is None or services.publication_ledger is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        try:
+            period = Period(payload.period_start, payload.period_end)
+            archive_stream = None if payload.stream == "mixed" else payload.stream
+            candidates = services.news_archive.candidates_in_period(
+                start=period.start, end=period.end, stream=archive_stream, limit=100,
+            )
+        except ValueError:
+            raise APIError(ErrorCode.CONTRACT_INVALID) from None
+
+        complete = len(candidates) < 100
+        collected: list[Mapping[str, Any]] = []
+        classifications: list[Mapping[str, Any]] = []
+        clusters: list[Mapping[str, Any]] = []
+        corr = correlation_id(request)
+        for candidate in candidates:
+            if not all(decide_access(principal.subject_id, principal.role, kind, candidate["news_id"],
+                                     "read", services.grants)["allowed"] is True
+                       for kind in ("archive", "newsroom")):
+                continue
+            try:
+                services.sources.require_usable(candidate["source_id"], stream=candidate["stream"])
+            except (SourceNotFound, SourceNotAllowed):
+                continue
+            item = services.pipeline.processed.get(candidate["news_id"])
+            if item is None:
+                complete = False
+                continue
+            for kind in ("archive", "newsroom"):
+                authorize(services, principal, resource_type=kind, resource_id=candidate["news_id"],
+                          action="read", correlation_id=corr)
+            collected.append(item.news)
+            classifications.append(item.classification)
+            clusters.append(item.cluster)
+
+        publication = services.publication_ledger.overview(limit=100)
+        complete = complete and publication["bounded"] is False
+        jobs: list[Mapping[str, Any]] = []
+        results: list[Mapping[str, Any]] = []
+        for overview in publication["items"]:
+            attempt = overview["attempt"]
+            scheduled = datetime.fromisoformat(overview["scheduled_at"].replace("Z", "+00:00"))
+            attempted = (datetime.fromisoformat(attempt["started_at"].replace("Z", "+00:00"))
+                         if attempt is not None else None)
+            if not (period.start <= scheduled < period.end
+                    or attempted is not None and period.start <= attempted < period.end):
+                continue
+            job = services.publication_ledger.get(overview["job_id"])
+            if job is None:
+                complete = False
+                continue
+            jobs.append(job)
+            if attempt is not None:
+                results.append({
+                    "schema_version": "1.0", "job_id": job["job_id"],
+                    "object_id": job["object_id"],
+                    "deliveries": [{
+                        "destination_id": overview["destination_id"], "status": attempt["status"],
+                        "external_message_id": attempt["message_id"],
+                        "attempted_at": attempt["started_at"], "error_code": attempt["error_code"],
+                    }],
+                    "completed_at": attempt["ended_at"] or attempt["started_at"],
+                })
+        revisions = {"raw": digest(collected),
+                     "processing": digest([classifications, clusters]),
+                     "publication": digest([jobs, results])}
+        try:
+            return compute_metrics(
+                period, stream=payload.stream, raw=collected,
+                classifications=classifications, clusters=clusters,
+                publication_jobs=jobs, publication_results=results,
+                source_revisions=revisions, complete=complete,
+            )
+        except ValueError:
+            raise APIError(ErrorCode.INVALID_STATE) from None
+
+    @root.post("/metrics")
+    def refresh_metrics(payload: MetricInput, request: Request, response: Response,
+                        principal: Principal = Depends(principal_dep),
+                        services: Services = Depends(services_dep)) -> dict[str, Any]:
+        if services.metrics is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        result = measured(payload, request, principal, services)
+        try:
+            saved = services.metrics.save(principal, result) if result.snapshot is not None else None
+        except ValueError:
+            raise APIError(ErrorCode.INVALID_STATE) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "scope": "authorized_subject",
+                "snapshot": saved["snapshot"] if saved else None,
+                "evidence": saved["evidence"] if saved else result.evidence}
+
+    @root.get("/metrics")
+    def read_metrics(period_start: datetime, period_end: datetime,
+                     request: Request, response: Response,
+                     stream: Literal["mixed", "domestic", "foreign", "manual"] = "mixed",
+                     principal: Principal = Depends(principal_dep),
+                     services: Services = Depends(services_dep)) -> dict[str, Any]:
+        metric_access(request, principal, services)
+        if services.metrics is None:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
+        try:
+            Period(period_start, period_end)
+            saved = services.metrics.latest(
+                principal, stream=stream, period_start=period_start, period_end=period_end,
+            )
+        except ValueError:
+            raise APIError(ErrorCode.CONTRACT_INVALID) from None
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "scope": "authorized_subject",
+                "snapshot": saved["snapshot"] if saved else None,
+                "evidence": saved["evidence"] if saved else {"reason": "SNAPSHOT_NOT_GENERATED"}}
+
+    root.include_router(router)
+    return root

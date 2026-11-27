@@ -100,6 +100,14 @@ def test_telegram_official_adapter_is_default_off_and_handles_ambiguous_delivery
     assert live.publish(payload, idempotency_key="key").message_id == "42"
     assert calls == [{"chat_id": "@test_channel", "text": payload["text"]}]
     assert live.status("key") is None
+    for changed in ({"address": "@other_channel"}, {"credential_ref": "telegram/other"},
+                    {"destination_id": "DST-OTHER"}):
+        with pytest.raises(ValueError, match="destination binding changed"):
+            live.validate_config({**dest.config, **changed})
+    live.validate_config(dest.config)
+    with pytest.raises(ValueError, match="explicit adapter identity"):
+        TelegramAdapter(" ", dest.config, secrets, transport=transport)
+    assert len(calls) == 1
     with pytest.raises(ValueError):
         live.dry_run({**payload, "destination_id": "wrong"})
     with pytest.raises(ValueError):
@@ -111,6 +119,7 @@ def test_telegram_official_adapter_is_default_off_and_handles_ambiguous_delivery
         (429, b'{"ok":false}', "failed"),
         (500, b'{"ok":false}', "unknown"),
         (200, b'{"ok":true}', "unknown"),
+        (200, b'{"ok":true,"result":{"message_id":42}}' + b" " * 1_048_576, "unknown"),
     ):
         def responder(token, data):
             return code, body

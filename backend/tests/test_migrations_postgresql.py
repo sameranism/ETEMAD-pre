@@ -68,11 +68,13 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 26
+            assert len(central_tables) == 28
+            assert ("ui", "saved_views") in central_tables
             assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
             assert {("insights", "public_report_drafts"), ("executive", "private_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
+            assert ("insights", "metric_snapshots") in central_tables
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
@@ -81,7 +83,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive",
+                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive", "ui",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "014_durable_workflow")
@@ -102,7 +104,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive", "ui"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -152,12 +154,118 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_publication_queue(central)
             _exercise_ai_cost_ledger()
             _exercise_workflow_handoff(central)
+            _exercise_role_dashboards(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
         finally:
             for database in reversed(created):
                 control.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+
+
+def _exercise_role_dashboards(central):
+    from alembic import command
+    from fastapi.testclient import TestClient
+
+    from backend.app.dependencies import build_services
+    from backend.app.main import create_app
+    from backend.core.auth import Principal, issue_session
+    from backend.core.permissions import Grant
+    from backend.modules.ui.saved_views import SavedViews
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    source = {"source_id": "SRC-DASHBOARD-TEST", "site_url": "https://example.invalid/dash",
+        "feed_url": "https://example.invalid/dash/rss", "country": "IR", "language": "fa",
+        "stream": "domestic", "license_scope": "summary", "enabled": True}
+    raw = {"schema_version": "1.0", "news_id": "NEWS-DASHBOARD-ECONOMY", "stream": "domestic",
+        "source_id": source["source_id"], "original_url": "https://example.invalid/dash/1",
+        "original_title": "بورس آزمایشی", "original_text": "بورس و تورم", "language": "fa",
+        "subject_countries": [], "collected_at": "2026-11-27T00:00:00Z",
+        "content_scope": "summary", "reuse_permission": "unverified"}
+    staff = Principal("fixture-dash-staff", "staff")
+    other = Principal("fixture-dash-other", "staff")
+    eic = Principal("fixture-dash-eic", "editor_in_chief")
+    owner = Principal("fixture-dash-owner", "owner")
+
+    def header(p):
+        return {"Authorization": "Bearer " + issue_session(p, services.session_key)}
+
+    def grant(p, kind, key, action):
+        services.grants.grant(Grant(p.subject_id, p.role, kind, key, action))
+
+    try:
+        services.sources.register(source)
+        services.pipeline.process(raw)
+        sports = {**raw, "news_id": "NEWS-DASHBOARD-SPORTS", "original_title": "فوتبال آزمایشی",
+                   "original_text": "لیگ فوتبال", "original_url": "https://example.invalid/dash/2"}
+        services.pipeline.process(sports)
+        grant(staff, "desk", "economy", "read")
+        grant(other, "desk", "economy", "read")
+        for p in (staff, eic):
+            grant(p, "newsroom", "feed", "read")
+            for item in (raw, sports):
+                grant(p, "newsroom", item["news_id"], "read")
+                grant(p, "editorial_workspace", item["news_id"], "read")
+        with TestClient(create_app(services=services)) as client:
+            ui = "/v1/ui"
+            assert client.get(ui + "/session").status_code == 401
+            for p in (staff, eic, owner):
+                assert client.get(ui + "/session", headers=header(p)).json()["role"] == p.role
+            for p, forbidden in ((staff, "owner-dashboard"), (staff, "editor-dashboard"),
+                                 (eic, "owner-dashboard"), (eic, "staff-dashboard"),
+                                 (owner, "editor-dashboard"), (owner, "staff-dashboard")):
+                assert client.get(ui + "/" + forbidden, headers=header(p)).status_code == 403
+            staff_page = client.get(ui + "/staff-dashboard", headers=header(staff))
+            assert staff_page.status_code == 200 and staff_page.headers["Cache-Control"] == "no-store"
+            body = staff_page.json()
+            assert body["desks"] == ["economy"]
+            assert [x["news_id"] for x in body["items"]] == [raw["news_id"]]
+            assert [x["news_id"] for x in body["tasks"]] == [raw["news_id"]]
+            assert "NEWS-DASHBOARD-SPORTS" not in staff_page.text
+            assert "metrics_snapshot" not in body and "operations" not in body and "private_reports" not in body
+            assert client.get(ui + "/desk/sports", headers=header(staff)).status_code == 403
+            assert client.get(ui + "/desk/economy?stream=foreign", headers=header(staff)).json()["items"] == []
+            assert [x["news_id"] for x in client.get("/v1/news", headers=header(staff)).json()["items"]] == [raw["news_id"]]
+            executive = client.get(ui + "/editor-dashboard", headers=header(eic)).json()
+            assert {x["news_id"] for x in executive["items"]} == {raw["news_id"], sports["news_id"]}
+            assert executive["metrics_snapshot"] is None
+            assert client.get(ui + "/owner-dashboard", headers=header(owner)).json()["operations"] == {}
+            for kind, key, action in (("operations","default","read"), ("source_registry","default","read"),
+                                       ("config","output_controls:global:controls-main","read"),
+                                       ("ai_cost","default","read"), ("audit","default","read")):
+                grant(owner, kind, key, action)
+            ops = client.get(ui + "/owner-dashboard", headers=header(owner)).json()["operations"]
+            assert ops["health"] == {"central":"ok","domestic":"ok","foreign":"ok"}
+            assert ops["controls"]["can_update"] is False
+            assert ops["ai_cost"]["committed_usd"] >= 0
+            assert ops["sources"]["registered"] >= 1
+            assert "private_report" not in str(ops)
+            saved_path = ui + "/saved-views"
+            form = {"name":"آزمایش", "desk":"economy", "stream":"domestic"}
+            assert client.put(saved_path, json={**form, "desk":"sports"}, headers=header(staff)).status_code == 403
+            saved = client.put(saved_path, json=form, headers=header(staff))
+            assert saved.status_code == 200, saved.text
+            row = saved.json()["saved"]
+            assert client.get(saved_path, headers=header(other)).json()["items"] == []
+            assert client.delete(saved_path+"/"+row["view_id"], headers=header(other)).status_code == 404
+            second = DatabaseRegistry()
+            try:
+                assert SavedViews(second.engine("central")).list(staff) == [row]
+            finally:
+                second.dispose()
+            replay = client.put(saved_path, json={**form, "stream":"all"}, headers=header(staff)).json()["saved"]
+            assert replay["view_id"] == row["view_id"]
+            services.grants.revoke(Grant(staff.subject_id, staff.role, "desk", "economy", "read"))
+            assert client.get(saved_path, headers=header(staff)).json()["items"] == []
+            assert client.get(ui + "/desk/economy", headers=header(staff)).status_code == 403
+            assert client.get("/v1/news", headers=header(staff)).json()["items"] == []
+            with pytest.raises(DBAPIError, match="saved views are not empty"):
+                command.downgrade(central, "015_executive_storage")
+            assert client.delete(saved_path+"/"+row["view_id"], headers=header(staff)).status_code == 200
+    finally:
+        services.registry.dispose()
 
 
 def _clear_workflow_test_rows(registry):
@@ -743,6 +851,12 @@ def _exercise_foreign_dashboard():
             for field in ("raw_count", "delivered_count", "received_count", "processed_count"):
                 assert after[field] == initial[field] + 1
             assert all(candidate["enabled"] is False for candidate in after["candidates"])
+            assert client.get("/v1/news", headers=headers).json()["items"] == []
+            for item in services.pipeline.feed(limit=200):
+                if item["source_id"] == source["source_id"]:
+                    services.grants.grant(Grant("fixture-staff", "staff", "newsroom", item["news_id"], "read"))
+                    for desk in item["desks"]:
+                        services.grants.grant(Grant("fixture-staff", "staff", "desk", desk, "read"))
             news = client.get("/v1/news", headers=headers).json()
             assert sum(item["source_id"] == source["source_id"] and item["stream"] == "foreign"
                        for item in news["items"]) == 1
@@ -881,13 +995,59 @@ def _exercise_editorial_workspace(central):
             assert generated["policy"]["decision"] == "human_review"
             assert client.post(generation_path, headers=gh, json=generate).json()["saved"] == generated
             assert provider.calls == ["fixture-translation", "fixture-editorial"]
+            from backend.app.workflow_worker import WorkflowWorker
+
+            # The worker must consume actual outbox jobs, not an injected fake queue.
+            # Isolate this worker run from earlier synthetic processing fixtures.
+            _clear_workflow_test_rows(services.registry)
+            worker = WorkflowWorker(services, lambda: principal)
+            new_raw = {**raw, "news_id": "NEWS-WORKER-PG", "original_url": "https://example.invalid/editorial/worker"}
+            denied_raw = {**raw, "news_id": "NEWS-WORKER-DENIED", "original_url": "https://example.invalid/editorial/denied"}
+            services.pipeline.process(denied_raw)
+            assert worker.run_one(project="P12", stream="foreign") == "held"
+            assert services.editorial.get(denied_raw["news_id"]) is None
+            assert len(provider.calls) == 2
+            services.pipeline.process(new_raw)
+            for resource, action in (("newsroom", "read"), ("editorial_workspace", "write"),
+                                     ("editorial_workspace", "generate")):
+                services.grants.grant(Grant(principal.subject_id, "staff", resource, new_raw["news_id"], action))
+            assert worker.run_one(project="P13", stream="domestic") == "empty"
+            assert worker.run_one(project="P12", stream="foreign") == "done"
+            worker_saved = services.editorial.get(new_raw["news_id"])
+            assert worker_saved["version"] == 1
+            assert worker_saved["translation"]["model_id"] == "fixture/fixture-translation"
+            assert worker_saved["quality"]["generation"]["mode"] == "fixture"
+            assert worker_saved["policy"]["decision"] == "human_review"
+            assert services.workflow_jobs.counts() == {"held": 1, "done": 1}
+            assert worker.run_one(project="P12", stream="foreign") == "empty"
+            assert len(provider.calls) == 4
+            # Revocation between translation and editorial must prevent the next call.
+            revoked_raw = {**raw, "news_id": "NEWS-WORKER-REVOKED", "original_url": "https://example.invalid/editorial/revoked"}
+            services.pipeline.process(revoked_raw)
+            for resource, action in (("newsroom", "read"), ("editorial_workspace", "write"),
+                                     ("editorial_workspace", "generate")):
+                services.grants.grant(Grant(principal.subject_id, "staff", resource, revoked_raw["news_id"], action))
+            original_complete = provider.complete
+
+            def revoke_after_translation(prompt, *, model, timeout_s):
+                result = original_complete(prompt, model=model, timeout_s=timeout_s)
+                services.grants.revoke(Grant(principal.subject_id, "staff", "editorial_workspace",
+                                             revoked_raw["news_id"], "generate"))
+                return result
+
+            provider.complete = revoke_after_translation
+            assert worker.run_one(project="P12", stream="foreign") == "failed"
+            assert provider.calls[-1] == "fixture-translation" and len(provider.calls) == 5
+            assert services.editorial.get(revoked_raw["news_id"]) is None
+            assert services.workflow_jobs.counts() == {"held": 1, "done": 1, "failed": 1}
+            provider.complete = original_complete
             assert client.get(path, headers=headers).json()["saved"] == generated
             assert client.get(path + "?version=1", headers=headers).json()["saved"] == saved
             services.sources.set_enabled(source["source_id"], False)
             assert client.get(path, headers=headers).status_code == 403
             assert client.put(path, headers={**h, "Idempotency-Key": "revoked"}, json=updated).status_code == 403
             assert client.post(generation_path, headers=gh, json=generate).status_code == 403
-            assert len(provider.calls) == 2
+            assert len(provider.calls) == 5
         engine = services.registry.engine("central")
         engine.dispose()
         reopened = EditorialRepository(engine)
@@ -1164,6 +1324,29 @@ def _exercise_analysis_workspace(central):
             assert chat["result"]["citations"][0]["source_ref"] == ref
             assert chat["result"]["citations"][0]["quote_span"] in raw["original_text"]
             assert "SECRET-DENIED" not in str(chat)
+            metrics_path = "/v1/metrics"
+            metric_input = {"period_start": payload["period_start"],
+                            "period_end": payload["period_end"], "stream": "foreign"}
+            assert client.post(metrics_path, json=metric_input).status_code == 401
+            assert client.post(metrics_path, headers=headers, json=metric_input).status_code == 403
+            metrics_grant = Grant(principal.subject_id, "staff", "analysis_workspace", "default", "metrics")
+            services.grants.grant(metrics_grant)
+            measured = client.post(metrics_path, headers=headers, json=metric_input)
+            assert measured.status_code == 200 and measured.headers["Cache-Control"] == "no-store"
+            snapshot = measured.json()["snapshot"]
+            assert snapshot["collected_count"] == snapshot["unique_count"] == 1
+            assert snapshot["published_count"] == snapshot["successful_deliveries"] == 0
+            restored = client.get(metrics_path, headers=headers, params=metric_input)
+            assert restored.status_code == 200 and restored.json()["snapshot"] == snapshot
+            other_metric = Principal("fixture-metric-other", "staff")
+            other_headers = {"Authorization": "Bearer " + issue_session(other_metric, services.session_key)}
+            services.grants.grant(Grant(other_metric.subject_id, "staff", "analysis_workspace", "default", "metrics"))
+            services.grants.grant(Grant(other_metric.subject_id, "staff", "archive", "default", "search"))
+            assert client.get(metrics_path, headers=other_headers,
+                              params=metric_input).json()["snapshot"] is None
+            services.grants.revoke(metrics_grant)
+            assert client.get(metrics_path, headers=headers, params=metric_input).status_code == 403
+            services.grants.grant(metrics_grant)
             assert client.post("/v1/analysis/chat", headers=headers,
                                json={**payload, "classification": "executive_private"}).status_code == 400
             memory_path = "/v1/analysis/chat/memory"
@@ -1319,6 +1502,11 @@ def _exercise_analysis_workspace(central):
             assert client.get(daily + "/5", headers=eic_headers).status_code == 404
             from alembic import command
             _clear_workflow_test_rows(services.registry)
+            with pytest.raises(DBAPIError, match="metric snapshots are not empty"):
+                command.downgrade(central, "016_saved_views")
+            with services.registry.engine("central").begin() as conn:
+                conn.execute(text("DELETE FROM insights.metric_snapshots WHERE subject_id=:id"),
+                             {"id": principal.subject_id})
             with pytest.raises(DBAPIError, match="report history is not empty"):
                 command.downgrade(central, "012_ai_cost_ledger")
             # Remove only this disposable test's report fixtures so the
