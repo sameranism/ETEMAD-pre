@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
+from backend.core.archive import PostgresNewsArchive
 from backend.core.sources_service import SourceService
 from backend.modules.domestic.collector import collect
 from backend.modules.domestic.feed_client import (
@@ -53,6 +54,8 @@ class IngestPipeline:
     processed: ProcessingRepository | PostgresProcessingRepository = field(
         default_factory=ProcessingRepository
     )
+
+    news_archive: PostgresNewsArchive | None = None
 
     # --- ingest -----------------------------------------------------------
     def poll_source(
@@ -172,6 +175,8 @@ class IngestPipeline:
     # --- processing -------------------------------------------------------
     def process(self, raw_record: Mapping[str, Any]) -> ProcessingItem:
         """Extract, normalise, cluster, classify and route one record."""
+        if self.news_archive is not None:
+            self.news_archive.capture(raw_record)
         extraction = extract(raw_record)
         normalized = normalize(raw_record)
         cluster = self.clusterer.cluster(normalized)
