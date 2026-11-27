@@ -890,6 +890,27 @@ def _exercise_analysis_workspace():
             assert "SECRET-DENIED" not in str(chat)
             assert client.post("/v1/analysis/chat", headers=headers,
                                json={**payload, "classification": "executive_private"}).status_code == 400
+            from backend.core.output_switches import OutputSwitches, default_off_switches
+
+            report_path = "/v1/analysis/reports/2"
+            assert client.post(report_path, headers=headers, json=payload).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "analysis_workspace", "default", "report"))
+            assert client.post(report_path, headers=headers, json=payload).status_code == 422
+            off = default_off_switches()
+            on = OutputSwitches.from_record({**off.record, "public_analysis": {"enabled": True}})
+            services.switches = lambda: on
+            report_response = client.post(report_path, headers=headers, json=payload)
+            assert report_response.status_code == 200 and report_response.headers["Cache-Control"] == "no-store"
+            report = report_response.json()
+            assert report["mode"] == "bounded_draft" and report["bounded"]
+            assert report["result"]["source_refs"] == [ref]
+            assert report["result"]["generation_status"] == "draft"
+            assert report["result"]["visibility"] == "public"
+            assert "SECRET-DENIED" not in report_response.text
+            assert client.post("/v1/analysis/reports/5", headers=headers, json=payload).status_code == 404
+            assert client.post("/v1/analysis/reports/1", headers=headers, json=payload).status_code == 400
+            services.switches = lambda: off
+            assert client.post(report_path, headers=headers, json=payload).status_code == 422
             services.sources.register({**source, "license_scope": "metadata"})
             redacted = client.post("/v1/analysis/chat", headers=headers, json=payload).json()
             assert redacted["evidence"][0]["text_redacted"]
