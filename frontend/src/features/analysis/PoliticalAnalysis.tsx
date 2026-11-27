@@ -92,7 +92,8 @@ function AnalysisSession({ token }: { token: string }) {
   const [followup, setFollowup] = useState(false);
   const [days, setDays] = useState("7");
   const [stream, setStream] = useState("");
-  const [mode, setMode] = useState<"run" | "chat" | "report">("run");
+  const [mode, setMode] = useState<"auto" | "run" | "chat" | "report">("auto");
+  const [selectedTool, setSelectedTool] = useState("");
   const [slot, setSlot] = useState("1");
   const [report, setReport] = useState<ReportEnvelope | null>(null);
   const [result, setResult] = useState<Envelope | null>(null);
@@ -129,28 +130,35 @@ function AnalysisSession({ token }: { token: string }) {
     event.preventDefault();
     if (busy || !query.trim()) return;
     let requestQuery: string;
-    try { requestQuery = composeChatQuery(query, mode === "chat" && followup ? context : null); }
+    try { requestQuery = composeChatQuery(query, (mode === "chat" || mode === "auto") && followup ? context : null); }
     catch { setMessage("مجموع سؤال و موضوع پیشین باید حداکثر ۵۰۰ نویسه باشد."); return; }
     const controller = new AbortController(); active.current = controller;
-    setBusy(true); setMessage(""); setResult(null); setReport(null);
+    setBusy(true); setMessage(""); setResult(null); setReport(null); setSelectedTool("");
     const end = new Date();
     const start = new Date(end.getTime() - Number(days) * 86400000);
     try {
-      const response = await fetch("/v1/analysis/" + (mode === "report" ? "reports/" + slot : mode), { method: "POST", signal: controller.signal,
+      const response = await fetch("/v1/analysis/assistant", { method: "POST", signal: controller.signal,
         credentials: "same-origin", cache: "no-store", redirect: "error",
         headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-        body: JSON.stringify({ query: requestQuery, period_start: start.toISOString(),
-          period_end: end.toISOString(), stream: stream || null, limit: 12 }) });
+        body: JSON.stringify({ action: mode === "auto" ? "auto" : mode === "chat" ? "research" : mode === "run" ? "analysis" : "public_report",
+          ...(mode === "report" ? { report_slot: Number(slot) } : {}),
+          evidence: { query: requestQuery, period_start: start.toISOString(),
+            period_end: end.toISOString(), stream: stream || null, limit: 12 } }) });
       if (response.status === 401 || response.status === 403) throw new Error("denied");
       if (response.status === 422 && mode === "report") throw new Error("disabled");
       if (!response.ok) throw new Error("unavailable");
       const data: unknown = await response.json();
       if (!controller.signal.aborted) {
-        if (mode === "report") setReport(parseReport(data));
-        else {
-          const parsed = parseAnalysis(data, mode);
-          setResult(parsed);
-          if (mode === "chat" && parsed.evidence.length > 0) {
+        if (!isObject(data)) throw new Error("invalid assistant response");
+        const action = data.assistant_action;
+        if (mode === "report" && action === "public_report") {
+          setReport(parseReport(data)); setSelectedTool("تولید گزارش");
+        } else {
+          const resolved = action === "research" ? "chat" : action === "analysis" ? "run" : null;
+          if (!resolved || (mode !== "auto" && mode !== resolved)) throw new Error("invalid assistant action");
+          const parsed = parseAnalysis(data, resolved);
+          setResult(parsed); setSelectedTool(resolved === "chat" ? "پژوهش خبری" : "تحلیل رویدادها");
+          if (resolved === "chat" && parsed.evidence.length > 0) {
             if (!followup || !context) setContext(query.trim());
             setQuery("");
           }
@@ -163,19 +171,21 @@ function AnalysisSession({ token }: { token: string }) {
     } finally { if (!controller.signal.aborted) setBusy(false); }
   }
   return <section className="news-desk" aria-labelledby="analysis-heading">
-    <h2 id="analysis-heading">ژرفان · تحلیل مستند و گفت‌وگو با آرشیو</h2>
-    <p>پاسخ استخراجی از اسناد مجاز؛ مدل خارجی فعال نیست. اختلاف پوشش منابع، اثبات صحت ادعاها نیست.</p>
+    <h2 id="analysis-heading">دستیار هوشمند اعتماد <span lang="en" dir="ltr">ETEMAD AI Assistant</span></h2>
+    <p>دستیار اختصاصی تحریریه اعتماد؛ پژوهش خبری، تحلیل رویدادها و تهیه پیش‌نویس گزارش با استفاده از ابزارهای مجاز سامانه.</p>
+    <p>استودیوی عمومی اشتراکی محصول مستقلی است و به این فضای سازمانی دسترسی ندارد.</p>
+    <p>نسخه فعلی: انتخاب محلی ابزار بر اساس درخواست و پاسخ استخراجی از اسناد مجاز؛ مدل مولد خارجی فعال نیست. اختلاف پوشش منابع، اثبات صحت ادعاها نیست.</p>
     <form className="grid gap-2" onSubmit={submit}>
       <fieldset disabled={busy} className="grid gap-2">
-        <label>نوع درخواست <select value={mode} onChange={event => {
-          setMode(event.target.value === "report" ? "report" : event.target.value === "chat" ? "chat" : "run"); setResult(null); setReport(null); setStream(""); setContext(null); setFollowup(false);
-        }}><option value="run">تحلیل روایی و خط زمانی</option><option value="chat">پرسش از آرشیو</option><option value="report">پیش‌نویس گزارش عمومی</option></select></label>
+        <label>ابزار دستیار <select value={mode} onChange={event => {
+          setMode(event.target.value === "report" ? "report" : event.target.value === "chat" ? "chat" : event.target.value === "run" ? "run" : "auto"); setResult(null); setReport(null); setStream(""); setContext(null); setFollowup(false); setSelectedTool("");
+        }}><option value="auto">انتخاب خودکار پژوهش یا تحلیل</option><option value="run">تحلیل روایی و خط زمانی</option><option value="chat">پژوهش خبری و پرسش از آرشیو</option><option value="report">پیش‌نویس گزارش عمومی</option></select></label>
         {mode === "report" && <label>نوع گزارش <select value={slot} onChange={event => {
           setSlot(event.target.value); setReport(null); setStream("");
         }}><option value="1">مرور اخبار ایران</option><option value="2">مرور اخبار جهان</option>
           <option value="3">زاویه‌های پوشش خبری</option><option value="4">جمع‌بندی روز</option></select></label>}
         <label>موضوع یا پرسش <textarea required maxLength={500} value={query} onChange={event => setQuery(event.target.value)} /></label>
-        {mode === "chat" && context && <div className="grid gap-1">
+        {(mode === "chat" || mode === "auto") && context && <div className="grid gap-1">
           <label><input type="checkbox" checked={followup} onChange={event => setFollowup(event.target.checked)} />
             ادامه موضوع قبلی در جست‌وجو</label>
           <p dir="auto">موضوع قبلی: {context}</p>
@@ -185,7 +195,7 @@ function AnalysisSession({ token }: { token: string }) {
           <p>منابع دوباره با مجوز جاری بازیابی می‌شوند؛ پاسخ‌ها و اسناد در حافظه ذخیره نمی‌شوند.</p>
           <button type="button" onClick={() => void memoryAction("PUT")}>ذخیره موضوع برای نشست بعدی</button>
         </div>}
-        {mode === "chat" && <div className="grid gap-1">
+        {(mode === "chat" || mode === "auto") && <div className="grid gap-1">
           <button type="button" onClick={() => void memoryAction("GET")}>بازیابی موضوع ذخیره‌شده</button>
           <button type="button" onClick={() => void memoryAction("DELETE")}>حذف حافظه پایدار من</button>
           <p>ذخیره اختیاری است؛ فقط موضوعی که خودتان وارد کرده‌اید و بازه و جریان انتخاب‌شده ذخیره می‌شود.</p>
@@ -196,10 +206,11 @@ function AnalysisSession({ token }: { token: string }) {
           <option value="1">۲۴ ساعت اخیر</option><option value="7">۷ روز اخیر</option><option value="30">۳۰ روز اخیر</option></select></label>
         {(mode !== "report" || !["1", "2"].includes(slot)) && <label>جریان <select value={stream} onChange={event => { setStream(event.target.value); setContext(null); setFollowup(false); setResult(null); setReport(null); }}>
           <option value="">همه مجاز</option><option value="domestic">ایران</option><option value="foreign">جهان</option></select></label>}
-        <button type="submit" disabled={!query.trim()}>{mode === "report" ? "ساخت پیش‌نویس از آرشیو" : mode === "run" ? "تحلیل اسناد" : "بازیابی پاسخ مستند"}</button>
+        <button type="submit" disabled={!query.trim()}>{mode === "report" ? "ساخت پیش‌نویس از آرشیو" : mode === "run" ? "تحلیل اسناد" : mode === "auto" ? "ارسال به دستیار" : "بازیابی پاسخ مستند"}</button>
       </fieldset>
     </form>
     {busy && <p role="status">در حال بازیابی شواهد…</p>}{message && <p role="alert">{message}</p>}
+    {selectedTool && (result || report) && <p role="status">ابزار استفاده‌شده: {selectedTool}</p>}
     {report && <div className="grid gap-3">
       <p>پیش‌نویس محدود به موضوع و اسناد مجاز است؛ گزارش کامل روزانه یا تأیید انتشار نیست.</p>
       {!report.result && <p>شاهد مرتبط یافت نشد.</p>}
