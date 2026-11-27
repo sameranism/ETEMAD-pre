@@ -345,3 +345,13 @@ describe("public draft report workspace", () => {
     expect(() => parseReport({ ...envelope, result: { ...result, sections: [{ ...result.sections[0], source_refs: ["unknown"] }] } })).toThrow();
   });
 });
+
+
+describe("P15 durable analysis controls", () => {
+  it("offers self-only recovery and deletion in the authenticated newsroom", () => {
+    const html = renderToStaticMarkup(createElement(PoliticalAnalysis, { token: "fixture-session" }));
+    expect(html).toContain("بازیابی آخرین تحلیل ذخیره‌شده");
+    expect(html).toContain("حذف تاریخچه تحلیل من");
+    expect(html).toContain("مجوز کنونی منبع");
+  });
+});
