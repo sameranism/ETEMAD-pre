@@ -67,19 +67,20 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 13
+            assert len(central_tables) == 15
+            assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
             assert ("processing", "foreign_inbox") in central_tables
             assert {('sources', 'source_registry'), ('sources', 'source_history')} <= central_tables
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources",
+                "audit", "control", "identity", "processing", "sources", "editorial",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources"} and row != ("identity", "login_throttle")
+                if row[0] not in {"processing", "sources", "editorial"} and row != ("identity", "login_throttle")
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -121,6 +122,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch):
             _exercise_foreign_storage(foreign, os.environ["ETEMAD_DB_FOREIGN_URL"])
             _exercise_foreign_inbox(central)
             _exercise_foreign_dashboard()
+            _exercise_editorial_workspace(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -528,5 +530,88 @@ def _exercise_foreign_dashboard():
                        for item in news["items"]) == 1
             services.sources.set_enabled(source["source_id"], False)
             assert client.post(poll_path, headers=headers).status_code == 403
+    finally:
+        services.registry.dispose()
+
+def _exercise_editorial_workspace(central):
+    from alembic import command
+    from fastapi.testclient import TestClient
+
+    from backend.app.dependencies import build_services
+    from backend.app.main import create_app
+    from backend.core.auth import Principal, issue_session
+    from backend.core.permissions import Grant
+    from backend.modules.editorial.repository import EditorialRepository
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    source = {"source_id": "SRC-EDITORIAL-FIXTURE", "site_url": "https://example.invalid/editorial",
+        "feed_url": "https://example.invalid/editorial/rss", "country": "DE", "language": "en",
+        "stream": "foreign", "license_scope": "summary", "enabled": True}
+    raw = {"schema_version": "1.0", "news_id": "NEWS-EDITORIAL-FIXTURE", "stream": "foreign",
+        "source_id": source["source_id"], "source_country": "DE", "language": "en",
+        "original_url": "https://example.invalid/editorial/one", "original_title": "Fixture report",
+        "original_text": 'Alice said “12 units”.', "subject_countries": [],
+        "collected_at": "2026-11-26T19:00:00+00:00", "content_scope": "summary",
+        "reuse_permission": "unverified"}
+    news_id = raw["news_id"]
+    principal = Principal("fixture-editor", "staff")
+    headers = {"Authorization": "Bearer " + issue_session(principal, services.session_key)}
+    path = "/v1/editorial/news/" + news_id + "/draft"
+    services.sources.register(source)
+    services.pipeline.process(raw)
+    try:
+        with TestClient(create_app(services=services)) as client:
+            assert client.get(path).status_code == 401
+            assert client.get(path, headers=headers).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "newsroom", news_id, "read"))
+            assert client.get(path, headers=headers).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "editorial_workspace", news_id, "read"))
+            first = client.get(path, headers=headers)
+            assert first.status_code == 200 and first.headers["Cache-Control"] == "no-store"
+            initial = first.json()
+            assert initial["saved"] is None and initial["latest_version"] == 0
+            assert initial["source"]["original_text"] == raw["original_text"]
+            payload = {"expected_version": 0, "source_hash": initial["source_hash"],
+                "desk": initial["desks"][0], "title": "گزارش نمونه", "lead": "Alice",
+                "body": 'Alice گفت «12 units».', "short_summary": "خلاصه نمونه",
+                "translated_text": 'Alice گفت «12 units».'}
+            h = {**headers, "Idempotency-Key": "fixture-save-1"}
+            assert client.put(path, headers=h, json=payload).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "editorial_workspace", news_id, "write"))
+            response = client.put(path, headers=h, json=payload)
+            assert response.status_code == 200, response.text
+            saved = response.json()["saved"]
+            assert saved["version"] == 1 and saved["article"]["status"] == "draft"
+            assert saved["translation"]["model_id"] == "human/manual"
+            assert saved["policy"]["decision"] == "human_review"
+            assert client.put(path, headers=h, json=payload).json()["saved"] == saved
+            assert client.put(path, headers=h, json={**payload, "title": "changed"}).status_code == 409
+            assert client.put(path, headers={**h, "Idempotency-Key": "stale"}, json=payload).status_code == 409
+            updated = {**payload, "expected_version": 1, "body": "Alice گفت 99 واحد.",
+                       "translated_text": "Alice گفت واحد."}
+            response = client.put(path, headers={**h, "Idempotency-Key": "fixture-save-2"}, json=updated)
+            assert response.status_code == 200, response.text
+            second = response.json()["saved"]
+            assert second["version"] == 2 and second["article"]["status"] == "held"
+            assert "FACT_NUMBER_MISMATCH" in second["translation"]["warnings"]
+            assert "DIRECT_QUOTE_MISMATCH" in second["translation"]["warnings"]
+            old = client.get(path + "?version=1", headers=headers).json()
+            assert old["saved"] == saved and old["latest_version"] == 2
+            assert [r["version"] for r in old["history"]] == [2, 1]
+            assert client.get(path + "?version=3", headers=headers).status_code == 404
+            assert services.pipeline.item(news_id)["news"]["original_text"] == raw["original_text"]
+            assert client.get(path.replace(news_id, "NEWS-OTHER"), headers=headers).status_code == 403
+            services.sources.set_enabled(source["source_id"], False)
+            assert client.get(path, headers=headers).status_code == 403
+            assert client.put(path, headers={**h, "Idempotency-Key": "revoked"}, json=updated).status_code == 403
+        engine = services.registry.engine("central")
+        engine.dispose()
+        reopened = EditorialRepository(engine)
+        assert reopened.get(news_id)["version"] == 2
+        assert reopened.get(news_id, 1) == saved
+        with pytest.raises(DBAPIError, match="editorial history is not empty"):
+            command.downgrade(central, "006_foreign_inbox")
     finally:
         services.registry.dispose()

@@ -54,6 +54,7 @@ from backend.modules.domestic.scheduler import (
     PostgresScheduleStore,
     ScheduleStore,
 )
+from backend.modules.editorial.repository import EditorialRepository
 from backend.modules.processing.repository import PostgresProcessingRepository, ProcessingRepository
 
 _LOG = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class Services:
     transport: FeedTransport
     accounts: PostgresAccountStore | None = None
     foreign_workflow: ForeignWorkflow | None = None
+    editorial: EditorialRepository | None = None
     orchestrator: Orchestrator = field(init=False)
 
     def run_domestic_schedule(self, *, worker_id: str, limit: int = 10) -> list[PollResult]:
@@ -254,6 +256,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         transport=transport,
         accounts=accounts,
         foreign_workflow=foreign_workflow,
+        editorial=EditorialRepository(registry.engine("central")) if storage == "postgres" else None,
     )
 
 
