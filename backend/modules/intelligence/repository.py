@@ -16,8 +16,6 @@ import stat
 from pathlib import Path
 from typing import Any, Mapping
 
-from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine, make_url
 
@@ -80,6 +78,8 @@ class ExecutiveReportStore:
         if (public_engine.dialect.name != "postgresql" or private_engine.dialect.name != "postgresql"
                 or len(key) != 32):
             raise ExecutiveStorageUnavailable("invalid executive storage configuration")
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
         _check_roles(public_engine, private_engine)
         self._public = public_engine
         self._engine = private_engine
@@ -90,6 +90,8 @@ class ExecutiveReportStore:
         self._engine.dispose()
 
     def _read(self, subject: str, row: Mapping[str, Any]) -> dict[str, Any]:
+        from cryptography.exceptions import InvalidTag
+
         ref = row["content_ref"]
         digest = row["sha256"]
         if ref != "reports/" + digest + ".bin":
