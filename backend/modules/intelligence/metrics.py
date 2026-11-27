@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
+from sqlalchemy import text
+from sqlalchemy.engine import Engine
+
+from backend.core.auth import Principal
 from backend.core.contracts import validate_payload
 from backend.modules.intelligence.evidence import Period
 
@@ -16,6 +20,64 @@ from backend.modules.intelligence.evidence import Period
 class MetricResult:
     snapshot: dict[str, Any] | None
     evidence: dict[str, Any]
+
+
+class MetricSnapshotRepository:
+    """P17-owned immutable, subject-scoped PostgreSQL snapshots."""
+
+    def __init__(self, engine: Engine) -> None:
+        if engine.dialect.name != "postgresql":
+            raise ValueError("metric snapshots require PostgreSQL")
+        self._engine = engine
+
+    def save(self, principal: Principal, result: MetricResult) -> dict[str, Any]:
+        snapshot = result.snapshot
+        if snapshot is None:
+            raise ValueError("unavailable metric snapshot")
+        validate_payload("metrics_snapshot", snapshot)
+        params = {
+            "subject": principal.subject_id, "snapshot": snapshot["snapshot_id"],
+            "stream": snapshot["stream"], "start": snapshot["time_range"]["from"],
+            "end": snapshot["time_range"]["to"],
+            "payload": json.dumps(snapshot, ensure_ascii=False, allow_nan=False),
+            "evidence": json.dumps(result.evidence, ensure_ascii=False, allow_nan=False),
+        }
+        with self._engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO insights.metric_snapshots
+                    (subject_id,snapshot_id,stream,period_start,period_end,payload,evidence)
+                VALUES (:subject,:snapshot,:stream,CAST(:start AS timestamptz),CAST(:end AS timestamptz),
+                        CAST(:payload AS jsonb),CAST(:evidence AS jsonb))
+                ON CONFLICT (subject_id,snapshot_id) DO NOTHING
+            """), params)
+            row = conn.execute(text("""
+                SELECT payload,evidence FROM insights.metric_snapshots
+                WHERE subject_id=:subject AND snapshot_id=:snapshot
+            """), params).mappings().one()
+
+        def stable(value: Mapping[str, Any]) -> dict[str, Any]:
+            return {key: item for key, item in value.items() if key != "generated_at"}
+
+        if stable(row["payload"]) != stable(snapshot) or row["evidence"] != result.evidence:
+            raise ValueError("immutable metric snapshot conflict")
+        return {"snapshot": dict(row["payload"]), "evidence": dict(row["evidence"])}
+
+    def latest(self, principal: Principal, *, stream: str,
+               period_start: datetime, period_end: datetime) -> dict[str, Any] | None:
+        if stream not in {"mixed", "domestic", "foreign", "manual"}:
+            raise ValueError("invalid metric stream")
+        with self._engine.connect() as conn:
+            row = conn.execute(text("""
+                SELECT payload,evidence FROM insights.metric_snapshots
+                WHERE subject_id=:subject AND stream=:stream
+                  AND period_start=:start AND period_end=:end
+                ORDER BY created_at DESC,snapshot_id DESC LIMIT 1
+            """), {"subject": principal.subject_id, "stream": stream,
+                     "start": period_start, "end": period_end}).mappings().one_or_none()
+        if row is None:
+            return None
+        validate_payload("metrics_snapshot", row["payload"])
+        return {"snapshot": dict(row["payload"]), "evidence": dict(row["evidence"])}
 
 
 def _time(value: str) -> datetime:
@@ -50,7 +112,14 @@ def compute_metrics(
             output[identity] = record
         return output
 
-    raw_index = indexed("raw_news", "news_id", raw)
+    raw_index: dict[str, Mapping[str, Any]] = {}
+    for record in raw:
+        contract = "normalized_news" if "normalization_version" in record else "raw_news"
+        validate_payload(contract, record)
+        identity = str(record["news_id"])
+        if identity in raw_index and raw_index[identity] != record:
+            raise ValueError("conflicting metric record")
+        raw_index[identity] = record
     classified = indexed("classified_news", "news_id", classifications)
     cluster_index = indexed("cluster_result", "news_id", clusters)
     jobs = indexed("publication_job", "job_id", publication_jobs)

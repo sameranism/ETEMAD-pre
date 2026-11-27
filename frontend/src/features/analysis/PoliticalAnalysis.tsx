@@ -8,6 +8,11 @@ type Envelope = { result: Result | null; evidence: EvidenceRef[] };
 type Report = { title: string; sections: { heading: string; body: string; source_refs: string[] }[] };
 type ReportEnvelope = { result: Report | null; evidence: EvidenceRef[] };
 type SavedMemory = { topic: string; days: 1 | 7 | 30; stream: "all" | "domestic" | "foreign" };
+type MetricSnapshot = { snapshot_id: string; stream: "mixed" | "domestic" | "foreign" | "manual";
+  time_range: { from: string; to: string }; collected_count: number; unique_count: number;
+  published_count: number; successful_deliveries: number; failed_deliveries: number;
+  unknown_deliveries: number; topic_coverage: { topic: string; count: number }[]; generated_at: string };
+type MetricEnvelope = { snapshot: MetricSnapshot | null; evidence: Record<string, unknown> };
 const isObject = (x: unknown): x is Record<string, unknown> => typeof x === "object" && x !== null && !Array.isArray(x);
 const strings = (x: unknown): x is string[] => Array.isArray(x) && x.every(y => typeof y === "string");
 function safeUrl(value: string) {
@@ -81,6 +86,29 @@ export function parseMemory(value: unknown): SavedMemory | null {
   return { topic: item.topic, days: item.days, stream: item.stream } as SavedMemory;
 }
 
+export function parseMetrics(value: unknown): MetricEnvelope {
+  if (!isObject(value) || value.schema_version !== "1.0" || value.scope !== "authorized_subject" ||
+      !isObject(value.evidence) || !(value.snapshot === null || isObject(value.snapshot))) {
+    throw new Error("Invalid metric envelope");
+  }
+  if (value.snapshot === null) return { snapshot: null, evidence: value.evidence };
+  const item = value.snapshot;
+  const counts = ["collected_count", "unique_count", "published_count", "successful_deliveries",
+    "failed_deliveries", "unknown_deliveries"];
+  if (item.schema_version !== "1.0" || typeof item.snapshot_id !== "string" || item.snapshot_id.length === 0 ||
+      !["mixed", "domestic", "foreign", "manual"].includes(String(item.stream)) ||
+      !isObject(item.time_range) || typeof item.time_range.from !== "string" ||
+      typeof item.time_range.to !== "string" || !Number.isFinite(Date.parse(item.time_range.from)) ||
+      !Number.isFinite(Date.parse(item.time_range.to)) || typeof item.generated_at !== "string" ||
+      !Number.isFinite(Date.parse(item.generated_at)) || counts.some(key =>
+        typeof item[key] !== "number" || !Number.isInteger(item[key]) || item[key] < 0) ||
+      !Array.isArray(item.topic_coverage) || !item.topic_coverage.every(row => isObject(row) &&
+        typeof row.topic === "string" && row.topic.length > 0 && Number.isInteger(row.count) && Number(row.count) >= 0)) {
+    throw new Error("Invalid metric snapshot");
+  }
+  return { snapshot: item as unknown as MetricSnapshot, evidence: value.evidence };
+}
+
 export default function PoliticalAnalysis({ token }: { token: string }) {
   // A new authentication session discards the previous conversation state.
   return <AnalysisSession key={token} token={token} />;
@@ -96,11 +124,39 @@ function AnalysisSession({ token }: { token: string }) {
   const [selectedTool, setSelectedTool] = useState("");
   const [slot, setSlot] = useState("1");
   const [report, setReport] = useState<ReportEnvelope | null>(null);
+  const [metrics, setMetrics] = useState<MetricEnvelope | null>(null);
+  const [metricsBusy, setMetricsBusy] = useState(false);
+  const [metricsMessage, setMetricsMessage] = useState("");
   const [result, setResult] = useState<Envelope | null>(null);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const active = useRef<AbortController | null>(null);
-  useEffect(() => () => active.current?.abort(), []);
+  const metricActive = useRef<AbortController | null>(null);
+  useEffect(() => () => { active.current?.abort(); metricActive.current?.abort(); }, []);
+  async function refreshMetrics() {
+    if (busy || metricsBusy) return;
+    const controller = new AbortController(); metricActive.current = controller;
+    setMetricsBusy(true); setMetricsMessage(""); setMetrics(null);
+    const end = new Date();
+    const start = new Date(end.getTime() - Number(days) * 86400000);
+    try {
+      const response = await fetch("/v1/metrics", { method: "POST", signal: controller.signal,
+        credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ period_start: start.toISOString(), period_end: end.toISOString(),
+          stream: stream || "mixed" }) });
+      if (response.status === 401 || response.status === 403) throw new Error("denied");
+      if (!response.ok) throw new Error("unavailable");
+      const parsed = parseMetrics(await response.json());
+      if (!controller.signal.aborted) {
+        setMetrics(parsed);
+        if (parsed.snapshot === null) setMetricsMessage("داده کامل و قابل اتکای این بازه هنوز در دسترس نیست.");
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) setMetricsMessage(error instanceof Error && error.message === "denied"
+        ? "مجوز مشاهده شاخص‌های تحریریه وجود ندارد." : "محاسبه شاخص‌ها در دسترس نیست.");
+    } finally { if (!controller.signal.aborted) setMetricsBusy(false); }
+  }
   async function memoryAction(method: "GET" | "PUT" | "DELETE") {
     if (busy || (method === "PUT" && !context)) return;
     const controller = new AbortController(); active.current = controller;
@@ -175,6 +231,21 @@ function AnalysisSession({ token }: { token: string }) {
     <p>دستیار اختصاصی تحریریه اعتماد؛ پژوهش خبری، تحلیل رویدادها و تهیه پیش‌نویس گزارش با استفاده از ابزارهای مجاز سامانه.</p>
     <p>استودیوی عمومی اشتراکی محصول مستقلی است و به این فضای سازمانی دسترسی ندارد.</p>
     <p>نسخه فعلی: انتخاب محلی ابزار بر اساس درخواست و پاسخ استخراجی از اسناد مجاز؛ مدل مولد خارجی فعال نیست. اختلاف پوشش منابع، اثبات صحت ادعاها نیست.</p>
+    <section className="news-item" aria-labelledby="metrics-heading">
+      <h3 id="metrics-heading">شاخص‌های مستند تحریریه</h3>
+      <p>اعداد فقط از snapshot کاملِ آرشیو، پردازش و نتیجه انتشار در بازه انتخابی ساخته می‌شوند؛ نبود مخرج به‌صورت «ناموجود» نمایش داده می‌شود.</p>
+      <button type="button" disabled={busy || metricsBusy} onClick={() => void refreshMetrics()}>
+        {metricsBusy ? "در حال محاسبه…" : "به‌روزرسانی شاخص‌های بازه"}
+      </button>
+      {metricsMessage && <p role="alert">{metricsMessage}</p>}
+      {metrics?.snapshot && <div className="grid gap-2" role="status">
+        <p>دریافت‌شده: {metrics.snapshot.collected_count} · یکتا: {metrics.snapshot.unique_count} · منتشرشده: {metrics.snapshot.published_count}</p>
+        <p>تحویل موفق: {metrics.snapshot.successful_deliveries} · ناموفق: {metrics.snapshot.failed_deliveries} · نامشخص: {metrics.snapshot.unknown_deliveries}</p>
+        <p>مخرج تحویل: {metrics.snapshot.successful_deliveries + metrics.snapshot.failed_deliveries + metrics.snapshot.unknown_deliveries || "ناموجود"}</p>
+        {metrics.snapshot.topic_coverage.length > 0 && <ul>{metrics.snapshot.topic_coverage.map(row =>
+          <li key={row.topic}>{row.topic}: {row.count}</li>)}</ul>}
+      </div>}
+    </section>
     <form className="grid gap-2" onSubmit={submit}>
       <fieldset disabled={busy} className="grid gap-2">
         <label>ابزار دستیار <select value={mode} onChange={event => {

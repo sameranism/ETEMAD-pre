@@ -60,6 +60,7 @@ from backend.modules.editorial.generation import EditorialGenerator
 from backend.modules.editorial.image_repository import ImageRepository
 from backend.modules.editorial.repository import EditorialRepository
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
+from backend.modules.intelligence.metrics import MetricSnapshotRepository
 from backend.modules.intelligence.report_repository import ReportRepository
 from backend.modules.intelligence.repository import (
     ExecutiveStorageUnavailable,
@@ -95,6 +96,7 @@ class Services:
     images: ImageRepository | None = None
     news_archive: PostgresNewsArchive | None = None
     chat_memory: PostgresChatMemory | None = None
+    metrics: MetricSnapshotRepository | None = None
     reports: ReportRepository | None = None
     publication_ledger: PostgresFixtureLedger | None = None
     workflow_jobs: PostgresWorkflowJobs | None = None
@@ -302,6 +304,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         workflow_jobs=workflow_jobs,
         publication_ledger=PostgresFixtureLedger(registry.engine("central")) if storage == "postgres" else None,
         reports=reports,
+        metrics=MetricSnapshotRepository(registry.engine("central")) if storage == "postgres" else None,
         chat_memory=PostgresChatMemory(registry.engine("central")) if storage == "postgres" else None,
         images=ImageRepository(registry.engine("central"), objects) if storage == "postgres" else None,
         editorial_generator=generator,

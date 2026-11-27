@@ -1,4 +1,4 @@
-import PoliticalAnalysis, { composeChatQuery, parseAnalysis, parseMemory, parseReport } from "../src/features/analysis/PoliticalAnalysis";
+import PoliticalAnalysis, { composeChatQuery, parseAnalysis, parseMemory, parseMetrics, parseReport } from "../src/features/analysis/PoliticalAnalysis";
 import { parseImages } from "../src/features/images/ImageWorkspace";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -289,6 +289,19 @@ describe("internal image renditions", () => {
 });
 
 describe("archive-backed intelligence", () => {
+  it("accepts measured snapshots and rejects private or malformed metrics", () => {
+    const snapshot = { schema_version: "1.0", snapshot_id: "MET-fixture", stream: "foreign",
+      time_range: { from: "2026-11-26T18:00:00Z", to: "2026-11-26T20:00:00Z" },
+      collected_count: 2, unique_count: 1, published_count: 1, successful_deliveries: 1,
+      failed_deliveries: 0, unknown_deliveries: 0,
+      topic_coverage: [{ topic: "diplomacy", count: 1 }], generated_at: "2026-11-27T00:00:00Z" };
+    const response = { schema_version: "1.0", scope: "authorized_subject", snapshot,
+      evidence: { delivery_denominator: 1 } };
+    expect(parseMetrics(response).snapshot?.unique_count).toBe(1);
+    expect(parseMetrics({ ...response, snapshot: null }).snapshot).toBeNull();
+    expect(() => parseMetrics({ ...response, snapshot: { ...snapshot, collected_count: -1 } })).toThrow();
+    expect(() => parseMetrics({ ...response, snapshot: { ...snapshot, stream: "executive_private" } })).toThrow();
+  });
   it("validates the opt-in saved topic without requiring cached evidence", () => {
     const memory = { topic: "بودجه", days: 7, stream: "domestic", updated_at: "2026-11-27T00:00:00Z" };
     expect(parseMemory({ schema_version: "1.0", memory })).toEqual({ topic: "بودجه", days: 7, stream: "domestic" });
