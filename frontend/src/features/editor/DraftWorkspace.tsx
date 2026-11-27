@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import TranslatorWorkspace from "../translation/TranslatorWorkspace";
+import ImageWorkspace from "../images/ImageWorkspace";
 import type { NewsFeedRecord } from "../newsroom/NewsDesk";
 
 type Fields = { title: string; lead: string; body: string; short_summary: string };
@@ -232,6 +233,9 @@ export default function DraftWorkspace({ token, items }: { token: string; items:
               <p>مجوز انتشار صادر نشده است: {workspace.saved.policy.reason_codes.join("، ")}</p>
             </div>}
           </form>
+          {workspace.saved && <ImageWorkspace key={selected + ":" + workspace.saved.version}
+            token={token} newsId={selected} version={workspace.saved.version}
+            editable={viewVersion === null && !dirty && workspace.saved.version === workspace.latest_version} />}
         </div>
       )}
     </section>
