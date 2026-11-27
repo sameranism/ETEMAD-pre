@@ -68,7 +68,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 22
+            assert len(central_tables) == 24
+            assert {("insights", "public_report_drafts"), ("insights", "executive_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
             assert ("editorial", "image_assets") in central_tables
@@ -130,7 +131,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_foreign_dashboard()
             _exercise_archive_workspace(central)
             _exercise_image_workspace(central)
-            _exercise_analysis_workspace()
+            _exercise_analysis_workspace(central)
             _exercise_publication_queue(central)
             _exercise_ai_cost_ledger()
             assert tables("foreign") == foreign_tables
@@ -838,7 +839,7 @@ def _exercise_image_workspace(central):
     finally:
         services.registry.dispose()
 
-def _exercise_analysis_workspace():
+def _exercise_analysis_workspace(central):
     from fastapi.testclient import TestClient
 
     from backend.app.dependencies import build_services
@@ -945,6 +946,53 @@ def _exercise_analysis_workspace():
             assert "SECRET-DENIED" not in report_response.text
             assert client.post("/v1/analysis/reports/5", headers=headers, json=payload).status_code == 404
             assert client.post("/v1/analysis/reports/1", headers=headers, json=payload).status_code == 400
+            daily = "/v1/analysis/daily-reports"
+            daily_input = {k: payload[k] for k in ("period_start", "period_end")}
+            assert [v["slot"] for v in client.get(daily, headers=headers).json()["slots"]] == [1, 2, 3, 4]
+            domestic_source = {**source, "source_id": "SRC-ANALYSIS-DOMESTIC",
+                               "stream": "domestic", "country": "IR"}
+            services.sources.register(domestic_source)
+            domestic = {**raw, "news_id": "NEWS-ANALYSIS-DOMESTIC", "source_id": domestic_source["source_id"],
+                        "stream": "domestic", "source_country": "IR", "language": "fa",
+                        "original_title": "خبر آزمایشی داخلی",
+                        "original_url": "https://example.invalid/analysis/domestic"}
+            services.pipeline.process(domestic)
+            for resource in ("archive", "newsroom"):
+                services.grants.grant(Grant(principal.subject_id, "staff", resource, domestic["news_id"], "read"))
+            for slot in (1, 2, 3, 4):
+                created = client.post(f"{daily}/{slot}", headers=headers, json=daily_input)
+                assert created.status_code == 200 and created.json()["saved"]["payload"]["visibility"] == "public"
+                latest = client.get(f"{daily}/{slot}", headers=headers)
+                assert latest.json()["saved"] == created.json()["saved"]
+                assert "SECRET-DENIED" not in latest.text
+            assert client.get(daily + "/5", headers=headers).status_code == 404
+            eic = Principal("fixture-daily-eic", "editor_in_chief")
+            eic_headers = {"Authorization": "Bearer " + issue_session(eic, services.session_key)}
+            services.grants.grant(Grant(eic.subject_id, eic.role, "analysis_workspace", "default", "report"))
+            services.grants.grant(Grant(eic.subject_id, eic.role, "archive", "default", "search"))
+            for item in (raw, domestic):
+                for resource in ("archive", "newsroom"):
+                    services.grants.grant(Grant(eic.subject_id, eic.role, resource, item["news_id"], "read"))
+            for slot in (5, 6, 7):
+                services.grants.grant(Grant(eic.subject_id, eic.role, "private_report", f"slot-{slot}", "read"))
+            services.switches = lambda: off
+            for slot in (5, 6, 7):
+                created = client.post(f"{daily}/{slot}", headers=eic_headers, json=daily_input)
+                assert created.status_code == 200 and created.json()["saved"]["payload"]["publishable"] is False
+                assert client.get(f"{daily}/{slot}", headers=eic_headers).json()["saved"] == created.json()["saved"]
+                assert client.get(f"{daily}/{slot}", headers=headers).status_code == 404
+            services.grants.revoke(Grant(eic.subject_id, eic.role, "private_report", "slot-5", "read"))
+            assert client.get(daily + "/5", headers=eic_headers).status_code == 404
+            from alembic import command
+            with pytest.raises(DBAPIError, match="report history is not empty"):
+                command.downgrade(central, "012_ai_cost_ledger")
+            # Remove only this disposable test's report fixtures so the
+            # independent older publication downgrade check can run.
+            with services.registry.engine("central").begin() as conn:
+                conn.execute(text("DELETE FROM insights.public_report_drafts WHERE subject_id=:id"),
+                             {"id": principal.subject_id})
+                conn.execute(text("DELETE FROM insights.executive_reports WHERE subject_id=:id"),
+                             {"id": eic.subject_id})
             services.switches = lambda: off
             assert client.post(report_path, headers=headers, json=payload).status_code == 422
             services.sources.register({**source, "license_scope": "metadata"})

@@ -4,6 +4,7 @@ import ArticleEditor from "../features/editor/ArticleEditor";
 import DraftWorkspace from "../features/editor/DraftWorkspace";
 import ArchiveSearch from "../features/archive/ArchiveSearch";
 import PoliticalAnalysis from "../features/analysis/PoliticalAnalysis";
+import DailyReports from "../features/reports/DailyReports";
 import Settings from "../features/settings/Settings";
 import { authMode, type AuthMode } from "../lib/auth";
 import NewsDesk, { type NewsFeedRecord } from "../features/newsroom/NewsDesk";
@@ -212,6 +213,7 @@ export default function App() {
             <NewsDesk items={items} state={state} />
             <ArchiveSearch key={"archive-" + token} token={token} />
             <PoliticalAnalysis key={"analysis-" + token} token={token} />
+            <DailyReports key={"reports-" + token} token={token} />
             {state === "error" && (
               <button type="button" onClick={() => {
                 setItems([]);

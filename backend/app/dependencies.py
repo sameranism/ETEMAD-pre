@@ -59,6 +59,7 @@ from backend.modules.editorial.generation import EditorialGenerator
 from backend.modules.editorial.image_repository import ImageRepository
 from backend.modules.editorial.repository import EditorialRepository
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
+from backend.modules.intelligence.report_repository import ReportRepository
 from backend.modules.processing.repository import PostgresProcessingRepository, ProcessingRepository
 
 _LOG = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ class Services:
     images: ImageRepository | None = None
     news_archive: PostgresNewsArchive | None = None
     chat_memory: PostgresChatMemory | None = None
+    reports: ReportRepository | None = None
     orchestrator: Orchestrator = field(init=False)
 
     def run_domestic_schedule(self, *, worker_id: str, limit: int = 10) -> list[PollResult]:
@@ -273,6 +275,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         accounts=accounts,
         foreign_workflow=foreign_workflow,
         news_archive=news_archive,
+        reports=ReportRepository(registry.engine("central"), grant_store) if storage == "postgres" else None,
         chat_memory=PostgresChatMemory(registry.engine("central")) if storage == "postgres" else None,
         images=ImageRepository(registry.engine("central"), objects) if storage == "postgres" else None,
         editorial_generator=generator,
