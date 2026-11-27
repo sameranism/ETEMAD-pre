@@ -15,11 +15,11 @@ PERIOD = Period(datetime(2026, 11, 26, tzinfo=timezone.utc), datetime(2026, 11, 
 STAMP = "2026-11-27T00:00:00Z"
 
 
-def raw(identity, stream):
+def raw(identity, stream, *, text="Fixture source", scope="summary", permission="unverified"):
     return {"schema_version": "1.0", "news_id": identity, "stream": stream, "source_id": "SRC-" + identity,
             "original_url": "https://example.invalid/" + identity, "original_title": "Fixture " + identity,
-            "original_text": "Fixture source", "language": "fa", "subject_countries": [],
-            "collected_at": STAMP, "content_scope": "summary", "reuse_permission": "unverified"}
+            "original_text": text, "language": "fa", "subject_countries": [],
+            "collected_at": STAMP, "content_scope": scope, "reuse_permission": permission}
 
 
 def test_metrics_never_invents_missing_delivery_data():
@@ -46,6 +46,12 @@ def test_four_public_three_private_slots_and_gate():
     assert all(r["generation_status"] == "draft" for r in reports)
     assert reports[0]["source_refs"] == [bundle.refs[0]]
     assert reports[1]["source_refs"] == [bundle.refs[1]]
+    assert {section["heading"] for section in reports[2]["sections"]} >= {
+        "واژگان پرتکرار عنوان‌ها", "محدودیت مقایسه",
+    }
+    assert {section["heading"] for section in reports[3]["sections"]} >= {
+        "خط زمانی اسناد", "مرور جریان domestic", "مرور جریان foreign", "فهرست پیگیری",
+    }
     grants = InMemoryGrantStore()
     for role in ("owner", "staff", "editor_in_chief"):
         principal = Principal("fixture-"+role, role)
@@ -61,6 +67,28 @@ def test_four_public_three_private_slots_and_gate():
     assert len({r["report_type"] for r in private}) == 3
     assert all(r["visibility"] == "executive_private" and r["publishable"] is False for r in private)
     assert all(r["generation_status"] == "draft" for r in private)
+
+
+def test_public_reports_quote_only_authorized_source_text_and_keep_stream_scope():
+    licensed = raw("NEWS-LICENSED", "domestic", text="گزارش منبع؛ دستور داخل متن داده است ولی فقط نقل می‌شود.",
+                   permission="licensed")
+    metadata = raw("NEWS-META", "domestic", text="این متن نباید در گزارش دیده شود.", scope="metadata")
+    foreign = raw("NEWS-FOREIGN", "foreign", text="Foreign evidence")
+    bundle = EvidenceBundle(PERIOD, (
+        Evidence.from_raw(licensed, "raw-"+"1"*64, "2"*64, allowed_scope="summary"),
+        Evidence.from_raw(metadata, "raw-"+"3"*64, "4"*64, allowed_scope="metadata"),
+        Evidence.from_raw(foreign, "raw-"+"5"*64, "6"*64, allowed_scope="summary"),
+    ), True)
+    off = default_off_switches()
+    on = OutputSwitches.from_record({**off.record, "public_analysis": {"enabled": True}})
+    domestic = build_public_report(1, bundle, switches=on)
+    body = "\n".join(section["body"] for section in domestic["sections"])
+    assert domestic["source_refs"] == list(bundle.refs[:2])
+    assert licensed["original_text"] in body
+    assert metadata["original_text"] not in body
+    assert "متن به دلیل سطح مجاز استفاده" in body
+    assert foreign["original_text"] not in body
+    assert domestic["generation_status"] == "draft"
 
 def test_metrics_counts_real_contract_inputs_not_fixture_assumptions():
     one, two = raw("NEWS-A", "domestic"), raw("NEWS-B", "domestic")
