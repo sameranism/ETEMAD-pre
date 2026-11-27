@@ -15,10 +15,11 @@ from urllib.parse import unquote
 from sqlalchemy.engine import Connection
 
 from backend.app.dependencies import Services, build_services
+from backend.app.editorial_runtime import build_workflow_fixture_runtime
 from backend.core.auth import AuthenticationError, Principal
 from backend.core.jobs import InvalidTransition
 from backend.core.permissions import decide_access
-from backend.core.sources_service import SourceNotAllowed, SourceNotFound
+from backend.core.sources_service import PostgresSourceService, SourceNotAllowed, SourceNotFound
 from backend.modules.editorial.repository import RevisionConflict
 from backend.modules.editorial.translator import canonical, checked_source, digest
 from backend.modules.processing.repository import PostgresProcessingRepository
@@ -190,17 +191,32 @@ class WorkflowWorker:
 
 
 def main() -> None:
-    if os.environ.get("ETEMAD_WORKFLOW_WORKER_MODE", "off") != "authorized":
+    mode = os.environ.get("ETEMAD_WORKFLOW_WORKER_MODE", "off")
+    if mode == "off":
         print(json.dumps({"mode": "off"}))
         return
+    if mode not in {"authorized", "fixture"}:
+        raise SystemExit("invalid workflow worker mode")
     actor_id = os.environ.get("ETEMAD_WORKFLOW_ACTOR_ID", "")
     if not 1 <= len(actor_id) <= 64:
         raise SystemExit("authorized staff identity required")
     services = build_services()
     try:
-        if services.accounts is None or services.editorial_generator is None:
-            raise SystemExit("persistent identity and authorized editorial runtime required")
-        if services.editorial_generator.mode != "live":
+        if services.accounts is None:
+            raise SystemExit("persistent identity required")
+        if mode == "fixture":
+            if services.editorial_generator is not None:
+                raise SystemExit("fixture worker cannot replace a configured editorial runtime")
+            try:
+                services.editorial_generator = build_workflow_fixture_runtime(
+                    os.environ,
+                    private_identity=True,
+                    persistent_sources=isinstance(services.sources, PostgresSourceService),
+                )
+            except ValueError:
+                raise SystemExit("authorized private workflow fixture required") from None
+        elif (services.editorial_generator is None
+              or services.editorial_generator.mode != "live"):
             raise SystemExit("configured runtime is not an authorized live generator")
         accounts = services.accounts
         counts = WorkflowWorker(services, lambda: accounts.current(actor_id)).tick()
