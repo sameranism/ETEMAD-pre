@@ -55,7 +55,7 @@ def analyze(topic: str, bundle: EvidenceBundle) -> dict[str, Any] | None:
         claims.append({
             "text": (
                 f"در متن مجاز بازیابی‌شده {len(narrative_groups)} صورت‌بندی متمایز "
-                "از روایت منابع وجود دارد؛ این تفاوت به‌تنهایی تناقض factual را اثبات نمی‌کند."
+                "از روایت منابع وجود دارد؛ این تفاوت به‌تنهایی تناقض واقعی را اثبات نمی‌کند."
             ),
             "source_refs": timeline_refs,
             "classification": "uncertain",
