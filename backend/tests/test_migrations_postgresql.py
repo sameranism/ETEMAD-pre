@@ -1007,6 +1007,16 @@ def _exercise_editorial_workspace(central):
             assert worker.run_one(project="P12", stream="foreign") == "held"
             assert services.editorial.get(denied_raw["news_id"]) is None
             assert len(provider.calls) == 2
+            with services.registry.engine("central").connect() as conn:
+                denied_audit = conn.execute(text("""
+                    SELECT actor_id, action, decision, correlation_id
+                    FROM audit.audit_entries WHERE resource_id = :news_id
+                    ORDER BY occurred_at, audit_id
+                """), {"news_id": denied_raw["news_id"]}).mappings().all()
+            assert [(row["actor_id"], row["action"], row["decision"]) for row in denied_audit] == [
+                (principal.subject_id, "newsroom.read", "DENY_DEFAULT"),
+            ]
+            assert denied_audit[0]["correlation_id"].startswith("workflow:")
             services.pipeline.process(new_raw)
             for resource, action in (("newsroom", "read"), ("editorial_workspace", "write"),
                                      ("editorial_workspace", "generate")):
@@ -1021,6 +1031,39 @@ def _exercise_editorial_workspace(central):
             assert services.workflow_jobs.counts() == {"held": 1, "done": 1}
             assert worker.run_one(project="P12", stream="foreign") == "empty"
             assert len(provider.calls) == 4
+            with services.registry.engine("central").connect() as conn:
+                allowed_audit = conn.execute(text("""
+                    SELECT DISTINCT actor_id, action, decision
+                    FROM audit.audit_entries WHERE resource_id = :news_id
+                """), {"news_id": new_raw["news_id"]}).mappings().all()
+            assert {(row["actor_id"], row["action"], row["decision"]) for row in allowed_audit} == {
+                (principal.subject_id, "newsroom.read", "ROLE_ALLOWED"),
+                (principal.subject_id, "editorial_workspace.write", "ROLE_ALLOWED"),
+                (principal.subject_id, "editorial_workspace.generate", "ROLE_ALLOWED"),
+            }
+
+            # Audit durability is part of authorization: if it is unavailable,
+            # no model call or editorial revision may occur.
+            audit_failure_raw = {**raw, "news_id": "NEWS-WORKER-AUDIT-FAILURE",
+                                 "original_url": "https://example.invalid/editorial/audit-failure"}
+            services.pipeline.process(audit_failure_raw)
+            for resource, action in (("newsroom", "read"), ("editorial_workspace", "write"),
+                                     ("editorial_workspace", "generate")):
+                services.grants.grant(Grant(principal.subject_id, "staff", resource,
+                                            audit_failure_raw["news_id"], action))
+            original_audit_record = services.auditor.record
+
+            def unavailable_audit(**_kwargs):
+                raise RuntimeError("fixture audit unavailable")
+
+            services.auditor.record = unavailable_audit  # type: ignore[method-assign]
+            try:
+                assert worker.run_one(project="P12", stream="foreign") == "failed"
+            finally:
+                services.auditor.record = original_audit_record  # type: ignore[method-assign]
+            assert services.editorial.get(audit_failure_raw["news_id"]) is None
+            assert len(provider.calls) == 4
+            assert services.workflow_jobs.counts() == {"held": 1, "done": 1, "failed": 1}
             # Revocation between translation and editorial must prevent the next call.
             revoked_raw = {**raw, "news_id": "NEWS-WORKER-REVOKED", "original_url": "https://example.invalid/editorial/revoked"}
             services.pipeline.process(revoked_raw)
@@ -1039,7 +1082,7 @@ def _exercise_editorial_workspace(central):
             assert worker.run_one(project="P12", stream="foreign") == "failed"
             assert provider.calls[-1] == "fixture-translation" and len(provider.calls) == 5
             assert services.editorial.get(revoked_raw["news_id"]) is None
-            assert services.workflow_jobs.counts() == {"held": 1, "done": 1, "failed": 1}
+            assert services.workflow_jobs.counts() == {"held": 1, "done": 1, "failed": 2}
             provider.complete = original_complete
             assert client.get(path, headers=headers).json()["saved"] == generated
             assert client.get(path + "?version=1", headers=headers).json()["saved"] == saved
