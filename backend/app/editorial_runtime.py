@@ -7,8 +7,9 @@ or permissive source policy is supplied. No network request during startup.
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Mapping
+from typing import Any, Mapping
 
 from sqlalchemy.engine import Engine
 
@@ -18,6 +19,85 @@ from backend.core.chat_provider import ChatProvider, ChatRoute
 from backend.core.contracts import validate_payload
 from backend.core.secrets import EnvSecretStore
 from backend.modules.editorial.generation import EditorialGenerator, EditorialProfile
+
+
+@dataclass
+class EditorialFixtureProvider:
+    """Deterministic private-staging adapter with no network or billable route."""
+
+    name: str = "fixture"
+
+    def maximum_cost(self, prompt: str, *, model: str) -> float:
+        return 0.0
+
+    def complete(self, prompt: str, *, model: str, timeout_s: float) -> tuple[str, float]:
+        try:
+            material = json.loads(prompt)
+            if model == "fixture-translation":
+                output = material["source_text"]
+                if not isinstance(output, str) or not output.strip():
+                    raise ValueError
+                return output, 0.0
+            if model == "fixture-editorial":
+                output = material["material"]
+                if not isinstance(output, str) or not output.strip():
+                    raise ValueError
+                output = output.strip()
+                title = output.splitlines()[0][:110].strip() or output[:110]
+                summary = output[:300].strip()
+                return json.dumps({
+                    "title": title,
+                    "lead": summary,
+                    "body": output,
+                    "short_summary": summary,
+                }, ensure_ascii=False), 0.0
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+        raise ValueError("invalid fixture editorial request")
+
+
+def _profiles(config: Mapping[str, Any]) -> dict[tuple[str, str], EditorialProfile]:
+    profiles: dict[tuple[str, str], EditorialProfile] = {}
+    for profile in config["profiles"]:
+        if set(profile) != {"ruleset", "framework"}:
+            raise ValueError("invalid editorial profile")
+        frame = profile["framework"]
+        scope = (frame["stream"], frame["desk"])
+        if scope in profiles or scope[0] not in {"domestic", "foreign", "manual"}:
+            raise ValueError("duplicate or invalid profile scope")
+        profiles[scope] = EditorialProfile(profile["ruleset"], frame)
+    if not profiles:
+        raise ValueError("editorial profile is required")
+    return profiles
+
+
+def build_workflow_fixture_runtime(
+    environ: Mapping[str, str], *, private_identity: bool, persistent_sources: bool,
+) -> EditorialGenerator:
+    """Build only the explicitly authorized, private-staging fixture adapter."""
+    if (environ.get("ETEMAD_ENV") != "staging"
+            or environ.get("ETEMAD_FEED_MODE", "fixture") != "fixture"
+            or environ.get("ETEMAD_EDITORIAL_AI_MODE", "off") != "off"
+            or environ.get("ETEMAD_WORKFLOW_FIXTURE_AUTHORIZED") != "yes"
+            or not private_identity or not persistent_sources):
+        raise ValueError("workflow fixture requires private persistent staging")
+    try:
+        raw = environ.get("ETEMAD_WORKFLOW_FIXTURE_CONFIG", "")
+        if not raw or len(raw) > 500_000:
+            raise ValueError("invalid configuration size")
+        config = json.loads(raw)
+        if not isinstance(config, dict) or set(config) != {"profiles"}:
+            raise ValueError("invalid fixture configuration")
+        profiles = _profiles(config)
+        bindings = {
+            task: ModelBinding(task, "fixture", "fixture-" + task, run_budget_usd=0.0)
+            for task in ("translation", "editorial")
+        }
+        providers: dict[str, Provider] = {"fixture": EditorialFixtureProvider()}
+        gateway = Gateway(bindings, providers, enabled=True, monthly_budget_usd=0.0)
+        return EditorialGenerator(gateway, profiles, mode="fixture")
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise ValueError("invalid authorized workflow fixture configuration") from None
 
 
 def build_editorial_runtime(

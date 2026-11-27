@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy import create_engine
 
-from backend.app.editorial_runtime import build_editorial_runtime
+from backend.app.editorial_runtime import build_editorial_runtime, build_workflow_fixture_runtime
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "source/contracts/examples"
 
@@ -48,3 +48,57 @@ def test_editorial_runtime_connects_routes_and_source_scope():
         assert not generator.available(raw, "other")
     finally:
         engine.dispose()
+
+
+def test_workflow_fixture_runtime_is_private_persistent_and_zero_cost():
+    config = {"profiles": [{
+        "ruleset": example("editorial_rules"),
+        "framework": example("news_framework"),
+    }]}
+    env = {
+        "ETEMAD_ENV": "staging",
+        "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_EDITORIAL_AI_MODE": "off",
+        "ETEMAD_WORKFLOW_FIXTURE_AUTHORIZED": "yes",
+        "ETEMAD_WORKFLOW_FIXTURE_CONFIG": json.dumps(config),
+    }
+    with pytest.raises(ValueError, match="workflow fixture|invalid authorized"):
+        build_workflow_fixture_runtime({}, private_identity=True, persistent_sources=True)
+    with pytest.raises(ValueError, match="workflow fixture|invalid authorized"):
+        build_workflow_fixture_runtime(env, private_identity=False, persistent_sources=True)
+    with pytest.raises(ValueError, match="workflow fixture|invalid authorized"):
+        build_workflow_fixture_runtime(
+            {**env, "ETEMAD_EDITORIAL_AI_MODE": "live"},
+            private_identity=True,
+            persistent_sources=True,
+        )
+
+    generator = build_workflow_fixture_runtime(
+        env, private_identity=True, persistent_sources=True,
+    )
+    raw = {
+        "schema_version": "1.0",
+        "news_id": "NEWS-WORKFLOW-FIXTURE",
+        "stream": "foreign",
+        "source_id": "SRC-WORKFLOW-FIXTURE",
+        "source_country": "DE",
+        "language": "en",
+        "original_url": "https://example.invalid/workflow-fixture",
+        "original_title": "Fixture workflow",
+        "original_text": 'Alice said “12 units”.',
+        "subject_countries": [],
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "content_scope": "summary",
+        "reuse_permission": "unverified",
+    }
+    assert generator.mode == "fixture"
+    assert generator.available(raw, "international")
+    generated = generator.generate(raw, desk="international")
+    assert generated.mode == "fixture"
+    assert generated.translation is not None
+    assert generated.translation.record["translated_text"] == raw["original_text"]
+    assert generated.translation.provenance["provider"] == "fixture"
+    assert generated.translation.provenance["cost_usd"] == 0.0
+    assert generated.article.record["source_refs"] == [raw["news_id"]]
+    assert generated.article.provenance["model"] == "fixture-editorial"
+    assert generated.article.provenance["cost_usd"] == 0.0
