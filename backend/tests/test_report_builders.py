@@ -140,3 +140,16 @@ def test_metrics_accepts_the_versioned_normalized_producer_record():
     assert result.snapshot is not None
     assert result.snapshot["collected_count"] == result.snapshot["unique_count"] == 1
     assert result.snapshot["topic_coverage"] == [{"topic": "diplomacy", "count": 1}]
+
+
+def test_p15_analysis_store_rejects_non_postgresql_engine():
+    from sqlalchemy import create_engine
+
+    from backend.modules.intelligence.analysis_store import PostgresAnalysisHistory
+
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with pytest.raises(ValueError, match="requires PostgreSQL"):
+            PostgresAnalysisHistory(engine)
+    finally:
+        engine.dispose()
