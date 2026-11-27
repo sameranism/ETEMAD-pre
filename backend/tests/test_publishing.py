@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+
 from backend.adapters.base import FixtureAdapter
 from backend.adapters.registry import AdapterRegistry
 from backend.core.output_switches import OutputSwitches, default_off_switches
