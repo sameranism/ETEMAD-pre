@@ -1,0 +1,98 @@
+import { useEffect, useRef, useState, type FormEvent } from "react";
+
+type Candidate = { destination_id: string; platform: string; name: string; address: string;
+  allowed_streams: string[]; desks: string[]; has_credential_ref: boolean; enabled: false; connection_state: "unverified" };
+type Directory = { items: Candidate[]; can_register: boolean; bounded: boolean };
+const platforms = { telegram: "تلگرام", bale: "بله", eitaa: "ایتا", rubika: "روبیکا" };
+const object = (x: unknown): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x);
+const strings = (x: unknown): x is string[] => Array.isArray(x) && x.every(y => typeof y === "string");
+function parseDirectory(x: unknown): Directory {
+  if (!object(x) || x.schema_version !== "1.0" || typeof x.can_register !== "boolean" ||
+      typeof x.bounded !== "boolean" || !Array.isArray(x.items) || x.items.length > 100 ||
+      !x.items.every(i => object(i) && ["destination_id", "platform", "name", "address"].every(k => typeof i[k] === "string") &&
+        Object.keys(platforms).includes(String(i.platform)) && strings(i.allowed_streams) && strings(i.desks) &&
+        typeof i.has_credential_ref === "boolean" && i.enabled === false &&
+        i.connection_state === "unverified")) throw new Error("invalid directory");
+  return x as Directory;
+}
+
+export default function DestinationDirectory({ token }: { token: string }) {
+  const [data, setData] = useState<Directory | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [platform, setPlatform] = useState("telegram");
+  const [name, setName] = useState("");
+  const [address, setAddress] = useState("");
+  const [ref, setRef] = useState("");
+  const [domestic, setDomestic] = useState(true);
+  const [foreign, setForeign] = useState(false);
+  const [desks, setDesks] = useState("");
+  const active = useRef<AbortController | null>(null);
+  const path = "/v1/publishing/destinations";
+  async function load(controller: AbortController) {
+    const r = await fetch(path, { signal: controller.signal, credentials: "same-origin", cache: "no-store",
+      redirect: "error", headers: { Authorization: "Bearer " + token } });
+    if (!r.ok) throw new Error("unavailable");
+    const result = parseDirectory(await r.json());
+    if (!controller.signal.aborted) setData(result);
+  }
+  useEffect(() => {
+    const controller = new AbortController(); active.current = controller;
+    setData(null);
+    load(controller).catch(() => { if (!controller.signal.aborted) setData(null); });
+    return () => active.current?.abort();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
+  async function register(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy || !data?.can_register || (!domestic && !foreign)) return;
+    const controller = new AbortController(); active.current = controller;
+    setBusy(true); setMessage("");
+    try {
+      const r = await fetch(path, { method: "POST", signal: controller.signal,
+        credentials: "same-origin", cache: "no-store", redirect: "error",
+        headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+        body: JSON.stringify({ platform, name, address, credential_ref: ref.trim() || null,
+          streams: [...(domestic ? ["domestic"] : []), ...(foreign ? ["foreign"] : [])],
+          desks: desks.split(",").map(x => x.trim()).filter(Boolean) }) });
+      if (!r.ok) throw new Error("unavailable");
+      await load(controller);
+      if (!controller.signal.aborted) {
+        setName(""); setAddress(""); setRef(""); setDesks("");
+        setMessage("مقصد غیرفعال ثبت شد؛ اتصال واقعی تأیید نشده است.");
+      }
+    } catch { if (!controller.signal.aborted) setMessage("ثبت مقصد ناموفق بود؛ ورودی یا مجوز را بررسی کنید."); }
+    finally { if (!controller.signal.aborted) setBusy(false); }
+  }
+  if (!data) return null;
+  return <section className="grid gap-3" aria-label="دفتر مقصدهای انتشار">
+    <h3>دفتر مقصدها</h3>
+    <p>مقصدهای ثبت‌شده تا احراز مجوز و اتصال API غیرفعال هستند. CMS و سایر پلتفرم‌های تأییدنشده متصل نیستند.</p>
+    {data.can_register && <form className="grid gap-2" onSubmit={register}>
+      <fieldset disabled={busy} className="grid gap-2">
+        <label>پیام‌رسان <select value={platform} onChange={e => setPlatform(e.target.value)}>
+          {Object.entries(platforms).map(([id, title]) => <option key={id} value={id}>{title}</option>)}
+        </select></label>
+        <label>نام مقصد <input required maxLength={120} value={name} onChange={e => setName(e.target.value)} /></label>
+        <label>شناسه کانال (عدد یا نام کاربری) <input required dir="ltr" maxLength={128}
+          value={address} onChange={e => setAddress(e.target.value)} /></label>
+        <label>مرجع اعتبارنامه (اختیاری؛ نه خود توکن) <input dir="ltr" maxLength={128}
+          value={ref} onChange={e => setRef(e.target.value)} placeholder="secrets/platform/channel" autoComplete="off" /></label>
+        <label><input type="checkbox" checked={domestic} onChange={e => setDomestic(e.target.checked)} /> اخبار ایران</label>
+        <label><input type="checkbox" checked={foreign} onChange={e => setForeign(e.target.checked)} /> اخبار جهان</label>
+        <label>شناسه سرویس‌ها (اختیاری، جداشده با کاما) <input dir="ltr" value={desks}
+          maxLength={1300} onChange={e => setDesks(e.target.value)} /></label>
+        <button type="submit" disabled={!domestic && !foreign}>ثبت مقصد غیرفعال</button>
+      </fieldset>
+    </form>}
+    {message && <p role="status">{message}</p>}
+    {!data.items.length && <p>هنوز مقصدی ثبت نشده است.</p>}
+    {data.bounded && <p>۱۰۰ مقصد آخر نمایش داده می‌شود.</p>}
+    {data.items.map(i => <article key={i.destination_id} className="news-item">
+      <h4>{i.name} · {platforms[i.platform as keyof typeof platforms]}</h4>
+      <p dir="auto">{i.address}</p>
+      <p>غیرفعال · {i.has_credential_ref ? "مرجع اعتبارنامه ثبت شده" : "بدون مرجع اعتبارنامه"} · اتصال تأیید نشده</p>
+      <p>جریان: {i.allowed_streams.map(s => s === "domestic" ? "ایران" : "جهان").join("، ")}</p>
+    </article>)}
+  </section>;
+}
