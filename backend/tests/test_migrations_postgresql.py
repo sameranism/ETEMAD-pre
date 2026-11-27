@@ -544,8 +544,10 @@ def _exercise_editorial_workspace(central):
 
     from backend.app.dependencies import build_services
     from backend.app.main import create_app
+    from backend.core.ai_gateway import Gateway, ModelBinding
     from backend.core.auth import Principal, issue_session
     from backend.core.permissions import Grant
+    from backend.modules.editorial.generation import EditorialGenerator, EditorialProfile
     from backend.modules.editorial.repository import EditorialRepository
 
     services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
@@ -613,13 +615,70 @@ def _exercise_editorial_workspace(central):
             assert client.get(path + "?version=3", headers=headers).status_code == 404
             assert services.pipeline.item(news_id)["news"]["original_text"] == raw["original_text"]
             assert client.get(path.replace(news_id, "NEWS-OTHER"), headers=headers).status_code == 403
+
+            # AI composition is explicitly injected in a disposable test, never a live provider.
+            import json
+
+            class FixtureModel:
+                name = "fixture"
+                calls: list[str] = []
+
+                def complete(self, prompt, *, model, timeout_s):
+                    material = json.loads(prompt)
+                    assert material and timeout_s > 0
+                    self.calls.append(model)
+                    if model == "fixture-translation":
+                        return 'Alice گفت «12 units».', 0.0
+                    assert model == "fixture-editorial"
+                    return json.dumps({k: 'Alice گفت «12 units».' for k in
+                                       ("title", "lead", "body", "short_summary")}, ensure_ascii=False), 0.0
+
+            generation_path = path.removesuffix("/draft") + "/generate"
+            generate = {"expected_version": 2, "source_hash": initial["source_hash"], "desk": initial["desks"][0]}
+            gh = {**headers, "Idempotency-Key": "fixture-generation-1"}
+            assert client.post(generation_path, headers=gh, json=generate).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "editorial_workspace", news_id, "generate"))
+            assert client.post(generation_path, headers=gh, json=generate).status_code == 503
+            assert client.get(path, headers=headers).json()["ai_available"] is False
+            provider = FixtureModel()
+            gateway = Gateway({task: ModelBinding(task, "fixture", "fixture-" + task) for task in
+                               ("translation", "editorial")}, {"fixture": provider}, enabled=True)
+            ruleset = {"schema_version": "1.0", "ruleset_id": "RULE-PG-FIXTURE", "revision": 1,
+                "stream": "foreign", "desk": generate["desk"], "replacement_rules": [],
+                "prohibited_content_categories": [], "updated_at": raw["collected_at"]}
+            framework = {"schema_version": "1.0", "framework_id": "FW-PG-FIXTURE",
+                "stream": "foreign", "desk": generate["desk"], "headline_max_chars": 110,
+                "summary_max_chars": 300, "required_sections": ["title", "lead", "body", "sources"],
+                "attribution_required": True, "updated_at": raw["collected_at"]}
+            profiles = {("foreign", generate["desk"]): EditorialProfile(ruleset, framework)}
+            # Even an injected live composition cannot send unlicensed material.
+            assert not EditorialGenerator(gateway, profiles, mode="live").available(raw, generate["desk"])
+            services.editorial_generator = EditorialGenerator(gateway, profiles, mode="fixture")
+            view = client.get(path, headers=headers).json()
+            assert view["ai_available"] and view["generation_mode"] == "fixture"
+            assert client.post(generation_path, headers=gh, json={**generate, "expected_version": 1}).status_code == 409
+            assert provider.calls == []
+            result = client.post(generation_path, headers=gh, json=generate)
+            assert result.status_code == 200, result.text
+            generated = result.json()["saved"]
+            assert generated["version"] == 3 and generated["article"]["status"] == "draft"
+            assert generated["translation"]["model_id"] == "fixture/fixture-translation"
+            assert generated["quality"]["generation"]["mode"] == "fixture"
+            assert generated["quality"]["generation"]["article_provenance"]["model"] == "fixture-editorial"
+            assert generated["policy"]["decision"] == "human_review"
+            assert client.post(generation_path, headers=gh, json=generate).json()["saved"] == generated
+            assert provider.calls == ["fixture-translation", "fixture-editorial"]
+            assert client.get(path, headers=headers).json()["saved"] == generated
+            assert client.get(path + "?version=1", headers=headers).json()["saved"] == saved
             services.sources.set_enabled(source["source_id"], False)
             assert client.get(path, headers=headers).status_code == 403
             assert client.put(path, headers={**h, "Idempotency-Key": "revoked"}, json=updated).status_code == 403
+            assert client.post(generation_path, headers=gh, json=generate).status_code == 403
+            assert len(provider.calls) == 2
         engine = services.registry.engine("central")
         engine.dispose()
         reopened = EditorialRepository(engine)
-        assert reopened.get(news_id)["version"] == 2
+        assert reopened.get(news_id)["version"] == 3
         assert reopened.get(news_id, 1) == saved
         with pytest.raises(DBAPIError, match="editorial history is not empty"):
             command.downgrade(central, "006_foreign_inbox")

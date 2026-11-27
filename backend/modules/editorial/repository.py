@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
 from backend.core.contracts import validate_payload
+from backend.modules.editorial.generation import EditorialGenerator
 from backend.modules.editorial.policy import PolicyContext, evaluate_policy
 from backend.modules.editorial.quality import assess_quality
 from backend.modules.editorial.translator import (
@@ -121,6 +122,76 @@ class EditorialRepository:
         policy = evaluate_policy(article, object_type="article", rights={},
                                  context=PolicyContext("manual/unconfigured"))
         request_hash = digest(canonical([source_hash, expected_version, desk, dict(fields), translated_text, actor_id]))
+        return self._write(
+            source, desk=desk, expected_version=expected_version, request_id=request_id,
+            request_hash=request_hash, actor_id=actor_id,
+            prepare=lambda: (article, asdict(quality), policy, translation, provenance),
+        )
+
+    def save_generated(
+        self, raw: Mapping[str, Any], *, desk: str, generator: EditorialGenerator,
+        expected_version: int, expected_source_hash: str, request_id: str, actor_id: str,
+        revalidate: Callable[[], None],
+    ) -> dict[str, Any]:
+        source = checked_source(raw)
+        source_hash = digest(canonical(source))
+        news_id = source["news_id"]
+        if source_hash != expected_source_hash:
+            raise RevisionConflict("source changed")
+        if (not 0 <= expected_version < 2**31-1 or not 1 <= len(news_id) <= 64
+                or not 1 <= len(actor_id) <= 64 or not 1 <= len(request_id) <= 128
+                or not 1 <= len(desk) <= 64 or not generator.available(source, desk)):
+            raise ValueError("invalid generation request")
+        request_hash = digest(canonical(["generated", source_hash, expected_version, desk,
+                                         actor_id, generator.fingerprint(source, desk)]))
+
+        def prepare() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any],
+                               dict[str, Any] | None, dict[str, Any]]:
+            # The replay and version checks happen before the model is invoked.
+            # Only trusted application composition supplies the gateway.
+            revalidate()
+            result = generator.generate(source, desk=desk)
+            revalidate()
+            article = dict(result.article.record)
+            original = source["original_text"]
+            if result.article.source_hash != digest(original):
+                raise ValueError("generated article source mismatch")
+            translation = None
+            provenance: dict[str, Any] = {}
+            if result.translation is not None:
+                if result.translation.source_hash != digest(original):
+                    raise ValueError("generated translation source mismatch")
+                translation = dict(result.translation.record)
+                provenance = dict(result.translation.provenance)
+                # Each actual generation keeps its own model-request provenance.
+                translation["translation_id"] = "TR-" + digest(canonical([
+                    translation["translation_id"], source_hash, provenance["request_id"],
+                ]))[:32]
+                validate_payload("translation", translation)
+            quality = asdict(assess_quality(original, "\n".join(article[k] for k in FIELDS),
+                                            source_refs=(news_id,), attributed_refs=(news_id,)))
+            if not quality["passed"]:
+                article["status"] = "held"
+            quality["generation"] = {"mode": result.mode, "article_provenance": result.article.provenance,
+                                     "warnings": list(result.article.warnings)}
+            # Even a successful deterministic check is not semantic or legal approval.
+            policy = evaluate_policy(article, object_type="article", rights={},
+                                     context=PolicyContext(article["editorial_rules_version"]))
+            return article, quality, policy, translation, provenance
+
+        return self._write(
+            source, desk=desk, expected_version=expected_version, request_id=request_id,
+            request_hash=request_hash, actor_id=actor_id, prepare=prepare,
+        )
+
+    def _write(
+        self, source: dict[str, Any], *, desk: str, expected_version: int, request_id: str,
+        request_hash: str, actor_id: str,
+        prepare: Callable[[], tuple[dict[str, Any], dict[str, Any], dict[str, Any],
+                                    dict[str, Any] | None, dict[str, Any]]],
+    ) -> dict[str, Any]:
+        news_id = source["news_id"]
+        source_hash = digest(canonical(source))
         with self._engine.begin() as conn:
             # One transaction and a per-news lock protect concurrent writers and replay.
             conn.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:id, 0))"), {"id": news_id})
@@ -138,6 +209,8 @@ class EditorialRepository:
                 raise RevisionConflict("stale revision")
             if latest is not None and latest["article"]["desk"] != desk:
                 raise RevisionConflict("desk identity changed")
+            article, quality, policy, translation, provenance = prepare()
+            validate_payload("article", article)
             if translation is not None:
                 conn.execute(text("""
                     INSERT INTO editorial.translations (translation_id,news_id,source_hash,payload,provenance)
@@ -153,7 +226,7 @@ class EditorialRepository:
                         CAST(:payload AS jsonb),CAST(:quality AS jsonb),CAST(:policy AS jsonb),:actor,:tid)
             """), {"id": news_id, "version": expected_version + 1, "article": article["article_id"],
                    "request": request_id, "request_hash": request_hash, "source_hash": source_hash,
-                   "source": canonical(source), "payload": canonical(article), "quality": canonical(asdict(quality)),
+                   "source": canonical(source), "payload": canonical(article), "quality": canonical(quality),
                    "policy": canonical(policy), "actor": actor_id,
                    "tid": translation["translation_id"] if translation else None})
             result = self._read(conn, news_id, expected_version + 1)

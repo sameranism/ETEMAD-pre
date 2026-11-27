@@ -234,6 +234,10 @@ describe("source-linked durable drafts", () => {
     expect(parseWorkspace(response, item.news_id).source.original_text).toBe("Immutable source");
     expect(() => parseWorkspace(response, "NEWS-OTHER")).toThrow();
     expect(() => parseWorkspace({ ...response, source_hash: "bad" }, item.news_id)).toThrow();
+    expect(parseWorkspace({ ...response, ai_available: true, ai_desks: ["international"],
+      generation_mode: "fixture" }, item.news_id).generation_mode).toBe("fixture");
+    expect(() => parseWorkspace({ ...response, ai_available: true, ai_desks: [],
+      generation_mode: "fixture" }, item.news_id)).toThrow();
     const saved = { version: 1, source_hash: response.source_hash, source_snapshot: snapshot,
       article: { news_id: item.news_id, desk: "international", status: "draft",
         title: "title", lead: "lead", body: "body", short_summary: "summary" },
