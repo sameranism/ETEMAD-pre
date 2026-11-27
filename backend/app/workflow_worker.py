@@ -62,15 +62,49 @@ class WorkflowWorker:
             raise WorkHeld("source rights changed")
         return raw, list(dict.fromkeys(item.classification["desks"]))
 
-    def _principal(self, news_id: str) -> Principal:
+    def _principal(self, news_id: str, job_id: str) -> Principal:
         principal = self.actor()
+        correlation_id = "workflow:" + job_id
         if principal.role != "staff" or principal.must_reset_password:
+            self.services.auditor.record(
+                action="workflow_worker.identity",
+                actor_id=principal.subject_id,
+                actor_role=principal.role,
+                resource_type="workflow_job",
+                resource_id=job_id,
+                decision="INVALID_CONTEXT",
+                correlation_id=correlation_id,
+                details={"allowed": False},
+            )
             raise WorkHeld("invalid worker identity")
-        if not all(decide_access(principal.subject_id, principal.role, kind, news_id, action,
-                                 self.services.grants)["allowed"] is True
-                   for kind, action in (("newsroom", "read"), ("editorial_workspace", "write"),
-                                        ("editorial_workspace", "generate"))):
-            raise WorkHeld("worker access denied")
+        for resource_type, action in (
+            ("newsroom", "read"),
+            ("editorial_workspace", "write"),
+            ("editorial_workspace", "generate"),
+        ):
+            decision = decide_access(
+                principal.subject_id,
+                principal.role,
+                resource_type,
+                news_id,
+                action,
+                self.services.grants,
+                request_id=correlation_id,
+            )
+            # Authorization evidence must be durable before model work starts.
+            # Audit persistence failure propagates and therefore fails closed.
+            self.services.auditor.record(
+                action=f"{resource_type}.{action}",
+                actor_id=principal.subject_id,
+                actor_role=principal.role,
+                resource_type=resource_type,
+                resource_id=news_id,
+                decision=str(decision["reason_code"]),
+                correlation_id=correlation_id,
+                details={"allowed": decision["allowed"]},
+            )
+            if decision["allowed"] is not True:
+                raise WorkHeld("worker access denied")
         return principal
 
     def run_one(self, *, project: str, stream: str) -> str:
@@ -95,7 +129,7 @@ class WorkflowWorker:
         started = False
         try:
             raw, desks = self._source(claim)
-            principal = self._principal(raw["news_id"])
+            principal = self._principal(raw["news_id"], job_id)
             desk = next((d for d in desks if generator.available(raw, d)), None)
             if desk is None:
                 raise WorkHeld("no eligible editorial profile")
@@ -107,7 +141,7 @@ class WorkflowWorker:
 
             def revalidate() -> None:
                 latest, current_desks = self._source(claim)
-                if (self._principal(raw["news_id"]) != principal
+                if (self._principal(raw["news_id"], job_id) != principal
                         or desk not in current_desks or digest(canonical(latest)) != source_hash
                         or not generator.available(latest, desk)
                         or not queue.lease_is_current(job_id=job_id, lease_token=lease)):
