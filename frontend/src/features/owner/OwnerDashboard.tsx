@@ -13,6 +13,10 @@ const OUTPUT_NAMES: Record<string, string> = {
 const STATE_NAMES: Record<string, string> = { queued: "صف", running: "در اجرا", held: "متوقف",
   failed: "ناموفق", done: "اتمام", cancelled: "لغو" };
 const DB_NAMES: Record<string,string> = {central:"مرکزی",domestic:"داخلی",foreign:"خارجی"};
+const MONITOR_NAMES: Record<string, string> = { domestic: "پایش منابع داخلی", foreign: "پایش منابع خارجی" };
+const MONITOR_STATE: Record<string, string> = {
+  ok: "در دسترس", unavailable: "در دسترس نیست", not_authorized: "خارج از مجوز",
+};
 function OutputControls({ token, controls, refresh }: { token: string; controls: Controls; refresh: () => void }) {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -68,6 +72,9 @@ export function OwnerOverview({ data }: { data: OwnerData }) {
       <p className="dash-note">برآورد دفتر هزینه شامل رزروها و هزینه نامطمئن؛ صورتحساب نهایی نیست.</p></section>}
     {data.sources && <section className="dash-panel"><h2>سلامت منابع</h2>
       <p>{data.sources.registered.toLocaleString("fa-IR")} ثبت‌شده · {data.sources.enabled.toLocaleString("fa-IR")} فعال</p>
+      <div className="dash-control-grid">{Object.entries(data.sources.monitoring).map(([stream, status]) =>
+        <div className="dash-control" key={stream}><span>{MONITOR_NAMES[stream]}</span>
+          <strong>{MONITOR_STATE[status]}</strong></div>)}</div>
       <div className="dash-table"><table><thead><tr><th>منبع</th><th>جریان</th><th>فعال</th><th>آخرین دریافت موفق</th><th>خطاهای متوالی</th></tr></thead>
       <tbody>{data.sources.items.map(s => <tr key={s.source_id}><td dir="ltr">{s.source_id}</td>
         <td>{s.stream === "domestic" ? "داخلی" : "خارجی"}</td><td>{s.enabled ? "بله" : "خیر"}</td>
