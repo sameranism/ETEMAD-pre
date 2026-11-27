@@ -5,7 +5,7 @@ import pytest
 
 from backend.modules.intelligence.analysis import analyze
 from backend.modules.intelligence.chat import answer_question
-from backend.modules.intelligence.evidence import Evidence, Period
+from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
 from backend.modules.intelligence.retrieval import excerpt, retrieve, terms
 
 PERIOD = Period(datetime(2026, 11, 26, tzinfo=timezone.utc), datetime(2026, 11, 28, tzinfo=timezone.utc))
@@ -73,3 +73,50 @@ def test_whole_word_preferred_over_substring():
                           raw, "raw-" + ("a" if raw is first else "c")*64, "b"*64, allowed_scope=scope))
     assert [item.news_id for item in bundle.evidence] == [first["news_id"], second["news_id"]]
     assert excerpt(bundle.evidence[1], "Atlas") == "Atlases"
+
+
+def test_analysis_preserves_chronology_and_distinct_source_narratives():
+    early_raw = {
+        **RAW,
+        "source_id": "SRC-EARLY",
+        "original_url": "https://example.invalid/early",
+        "original_title": "Atlas change announced",
+        "original_text": "Atlas source reports that the change was announced.",
+        "collected_at": "2026-11-26T12:00:00Z",
+    }
+    late_raw = {
+        **RAW,
+        "news_id": "NEWS-INTELLIGENCE-LATE",
+        "source_id": "SRC-LATE",
+        "original_url": "https://example.invalid/late",
+        "original_title": "Atlas change questioned",
+        "original_text": "Atlas source reports that the change was questioned.",
+        "collected_at": "2026-11-27T12:00:00Z",
+    }
+    early = Evidence.from_raw(
+        early_raw, "raw-" + "c" * 64, "d" * 64, allowed_scope="summary",
+    )
+    late = Evidence.from_raw(
+        late_raw, "raw-" + "e" * 64, "f" * 64, allowed_scope="summary",
+    )
+    # Deliberately supply reverse order: analysis must expose source chronology.
+    result = analyze("Atlas", EvidenceBundle(PERIOD, (late, early), False))
+    assert result is not None
+    timeline = result["claims"][1]
+    assert timeline["classification"] == "documented"
+    assert timeline["source_refs"] == [early.artifact_id, late.artifact_id]
+    assert timeline["text"].index("SRC-EARLY") < timeline["text"].index("SRC-LATE")
+    attributed = [
+        claim for claim in result["claims"] if claim["classification"] == "attributed"
+    ]
+    assert [claim["source_refs"] for claim in attributed] == [
+        [early.artifact_id], [late.artifact_id],
+    ]
+    narrative = [
+        claim for claim in result["claims"]
+        if claim["classification"] == "uncertain"
+    ]
+    assert len(narrative) == 1
+    assert narrative[0]["source_refs"] == [early.artifact_id, late.artifact_id]
+    assert "صورت‌بندی متمایز" in narrative[0]["text"]
+    assert "تعارض factual را اثبات نمی‌کند" in narrative[0]["text"]
