@@ -1,3 +1,4 @@
+import PoliticalAnalysis, { parseAnalysis } from "../src/features/analysis/PoliticalAnalysis";
 import { parseImages } from "../src/features/images/ImageWorkspace";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -284,5 +285,20 @@ describe("internal image renditions", () => {
     expect(() => parseImages(response, 3)).toThrow();
     expect(() => parseImages({ ...response, items: [{ ...response.items[0],
       evidence: { publication_eligible: true } }] }, 2)).toThrow();
+  });
+});
+
+describe("archive-backed intelligence", () => {
+  const ref = "raw-" + "a".repeat(64);
+  const evidence = [{ source_ref: ref, news_id: "NEWS-ONE", title: "شاهد", original_url: "https://example.invalid/one",
+    collected_at: "2026-11-27T00:00:00Z", stream: "foreign", text_redacted: false }];
+  it("rejects citations not present in the authorized evidence bundle", () => {
+    const base = { schema_version: "1.0", mode: "extractive", evidence,
+      result: { schema_version: "1.0", topic: "موضوع", source_refs: [ref],
+        claims: [{ text: "عنوان منبع", source_refs: [ref], classification: "attributed" }], uncertainties: ["محدود"] } };
+    expect(parseAnalysis(base, "run").evidence).toHaveLength(1);
+    expect(() => parseAnalysis({ ...base, result: { ...base.result, source_refs: ["unknown"] } }, "run")).toThrow();
+    expect(() => parseAnalysis({ ...base, evidence: [{ ...evidence[0], stream: "executive_private" }] }, "run")).toThrow();
+    expect(renderToStaticMarkup(createElement(PoliticalAnalysis, { token: "fixture-not-real" }))).not.toContain("fixture-not-real");
   });
 });

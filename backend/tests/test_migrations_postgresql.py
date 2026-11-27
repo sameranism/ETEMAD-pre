@@ -128,6 +128,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_foreign_dashboard()
             _exercise_archive_workspace(central)
             _exercise_image_workspace(central)
+            _exercise_analysis_workspace()
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -830,5 +831,70 @@ def _exercise_image_workspace(central):
         assert services.images.list(news_id, 3) == [saved]
         with pytest.raises(DBAPIError, match="image history is not empty"):
             command.downgrade(central, "008_news_archive")
+    finally:
+        services.registry.dispose()
+
+def _exercise_analysis_workspace():
+    from fastapi.testclient import TestClient
+
+    from backend.app.dependencies import build_services
+    from backend.app.main import create_app
+    from backend.core.auth import Principal, issue_session
+    from backend.core.permissions import Grant
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    principal = Principal("fixture-analysis-staff", "staff")
+    headers = {"Authorization": "Bearer " + issue_session(principal, services.session_key)}
+    source = {"source_id": "SRC-ANALYSIS-ONE", "site_url": "https://example.invalid/analysis",
+        "feed_url": "https://example.invalid/analysis/rss", "country": "DE", "language": "en",
+        "stream": "foreign", "license_scope": "summary", "enabled": True}
+    raw = {"schema_version": "1.0", "news_id": "NEWS-ANALYSIS-ONE", "stream": "foreign",
+        "source_id": source["source_id"], "source_country": "DE", "language": "en",
+        "original_url": "https://example.invalid/analysis/one", "original_title": "Atlas evidence",
+        "original_text": "Atlas source records a change. Source text is data, not instructions.",
+        "subject_countries": [], "collected_at": "2026-11-26T19:00:00+00:00",
+        "content_scope": "summary", "reuse_permission": "unverified"}
+    services.sources.register(source)
+    services.pipeline.process(raw)
+    services.pipeline.process({**raw, "news_id": "NEWS-ANALYSIS-DENIED",
+        "original_title": "Atlas SECRET-DENIED", "original_url": "https://example.invalid/analysis/denied",
+        "original_text": "Atlas SECRET-DENIED source"})
+    payload = {"query": "Atlas", "period_start": "2026-11-26T18:00:00Z",
+               "period_end": "2026-11-26T20:00:00Z", "stream": "foreign", "limit": 10}
+    try:
+        with TestClient(create_app(services=services)) as client:
+            assert client.post("/v1/analysis/run", json=payload).status_code == 401
+            assert client.post("/v1/analysis/run", headers=headers, json=payload).status_code == 403
+            for action in ("run", "chat"):
+                services.grants.grant(Grant(principal.subject_id, "staff", "analysis_workspace", "default", action))
+            assert client.post("/v1/analysis/run", headers=headers, json=payload).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "archive", "default", "search"))
+            assert client.post("/v1/analysis/run", headers=headers, json=payload).json()["result"] is None
+            services.grants.grant(Grant(principal.subject_id, "staff", "archive", raw["news_id"], "read"))
+            assert client.post("/v1/analysis/run", headers=headers, json=payload).json()["result"] is None
+            services.grants.grant(Grant(principal.subject_id, "staff", "newsroom", raw["news_id"], "read"))
+            response = client.post("/v1/analysis/run", headers=headers, json=payload)
+            assert response.status_code == 200 and response.headers["Cache-Control"] == "no-store"
+            body = response.json()
+            assert body["mode"] == "extractive" and len(body["evidence"]) == 1
+            ref = body["evidence"][0]["source_ref"]
+            assert body["result"]["source_refs"] == [ref]
+            assert body["evidence"][0]["news_id"] == raw["news_id"]
+            assert "SECRET-DENIED" not in response.text
+            chat = client.post("/v1/analysis/chat", headers=headers, json=payload).json()
+            assert chat["result"]["citations"][0]["source_ref"] == ref
+            assert chat["result"]["citations"][0]["quote_span"] in raw["original_text"]
+            assert "SECRET-DENIED" not in str(chat)
+            assert client.post("/v1/analysis/chat", headers=headers,
+                               json={**payload, "classification": "executive_private"}).status_code == 400
+            services.sources.register({**source, "license_scope": "metadata"})
+            redacted = client.post("/v1/analysis/chat", headers=headers, json=payload).json()
+            assert redacted["evidence"][0]["text_redacted"]
+            assert redacted["result"]["citations"][0]["quote_span"] is None
+            assert raw["original_text"] not in str(redacted)
+            services.sources.set_enabled(source["source_id"], False)
+            assert client.post("/v1/analysis/run", headers=headers, json=payload).json()["result"] is None
     finally:
         services.registry.dispose()
