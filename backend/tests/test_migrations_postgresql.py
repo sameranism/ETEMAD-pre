@@ -68,12 +68,13 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 27
+            assert len(central_tables) == 28
             assert ("ui", "saved_views") in central_tables
             assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
             assert {("insights", "public_report_drafts"), ("executive", "private_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
+            assert ("insights", "metric_snapshots") in central_tables
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
@@ -1323,6 +1324,29 @@ def _exercise_analysis_workspace(central):
             assert chat["result"]["citations"][0]["source_ref"] == ref
             assert chat["result"]["citations"][0]["quote_span"] in raw["original_text"]
             assert "SECRET-DENIED" not in str(chat)
+            metrics_path = "/v1/metrics"
+            metric_input = {"period_start": payload["period_start"],
+                            "period_end": payload["period_end"], "stream": "foreign"}
+            assert client.post(metrics_path, json=metric_input).status_code == 401
+            assert client.post(metrics_path, headers=headers, json=metric_input).status_code == 403
+            metrics_grant = Grant(principal.subject_id, "staff", "analysis_workspace", "default", "metrics")
+            services.grants.grant(metrics_grant)
+            measured = client.post(metrics_path, headers=headers, json=metric_input)
+            assert measured.status_code == 200 and measured.headers["Cache-Control"] == "no-store"
+            snapshot = measured.json()["snapshot"]
+            assert snapshot["collected_count"] == snapshot["unique_count"] == 1
+            assert snapshot["published_count"] == snapshot["successful_deliveries"] == 0
+            restored = client.get(metrics_path, headers=headers, params=metric_input)
+            assert restored.status_code == 200 and restored.json()["snapshot"] == snapshot
+            other_metric = Principal("fixture-metric-other", "staff")
+            other_headers = {"Authorization": "Bearer " + issue_session(other_metric, services.session_key)}
+            services.grants.grant(Grant(other_metric.subject_id, "staff", "analysis_workspace", "default", "metrics"))
+            services.grants.grant(Grant(other_metric.subject_id, "staff", "archive", "default", "search"))
+            assert client.get(metrics_path, headers=other_headers,
+                              params=metric_input).json()["snapshot"] is None
+            services.grants.revoke(metrics_grant)
+            assert client.get(metrics_path, headers=headers, params=metric_input).status_code == 403
+            services.grants.grant(metrics_grant)
             assert client.post("/v1/analysis/chat", headers=headers,
                                json={**payload, "classification": "executive_private"}).status_code == 400
             memory_path = "/v1/analysis/chat/memory"
@@ -1478,6 +1502,11 @@ def _exercise_analysis_workspace(central):
             assert client.get(daily + "/5", headers=eic_headers).status_code == 404
             from alembic import command
             _clear_workflow_test_rows(services.registry)
+            with pytest.raises(DBAPIError, match="metric snapshots are not empty"):
+                command.downgrade(central, "016_saved_views")
+            with services.registry.engine("central").begin() as conn:
+                conn.execute(text("DELETE FROM insights.metric_snapshots WHERE subject_id=:id"),
+                             {"id": principal.subject_id})
             with pytest.raises(DBAPIError, match="report history is not empty"):
                 command.downgrade(central, "012_ai_cost_ledger")
             # Remove only this disposable test's report fixtures so the

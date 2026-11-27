@@ -119,3 +119,24 @@ def test_metrics_counts_real_contract_inputs_not_fixture_assumptions():
     assert metrics.evidence["delivery_denominator"] == 3
     assert metrics.evidence["delivery_success_rate"] == pytest.approx(1/3)
     assert compute_metrics(PERIOD, **{**args, "publication_results": []}).snapshot is None
+
+
+def test_metrics_accepts_the_versioned_normalized_producer_record():
+    record = {**raw("NEWS-NORMALIZED", "foreign"), "source_country": "DE",
+              "published_at": None, "source_payload_ref": None,
+              "normalized_text": "Normalized fixture", "fingerprint": "fixture-fingerprint",
+              "normalization_version": "norm-v1"}
+    classification = {"schema_version": "1.0", "news_id": record["news_id"], "stream": "foreign",
+        "desks": ["world"], "topics": ["diplomacy"], "subject_countries": ["DE"],
+        "event_id": "EV-NORMALIZED", "operational_priority": "normal",
+        "rules_version": "v1", "classified_at": STAMP}
+    cluster = {"schema_version": "1.0", "news_id": record["news_id"],
+        "event_id": "EV-NORMALIZED", "duplicate_of": None, "related_news_ids": [],
+        "similarity_method": "fixture", "created_at": STAMP}
+    result = compute_metrics(PERIOD, stream="foreign", raw=[record],
+        classifications=[classification], clusters=[cluster], publication_jobs=[],
+        publication_results=[], source_revisions={"raw": "1", "processing": "1", "publication": "1"},
+        complete=True)
+    assert result.snapshot is not None
+    assert result.snapshot["collected_count"] == result.snapshot["unique_count"] == 1
+    assert result.snapshot["topic_coverage"] == [{"topic": "diplomacy", "count": 1}]
