@@ -70,7 +70,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central_tables = tables("central")
             assert len(central_tables) == 26
             assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
-            assert {("insights", "public_report_drafts"), ("insights", "executive_reports")} <= central_tables
+            assert {("insights", "public_report_drafts"), ("executive", "private_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
             assert ("editorial", "image_assets") in central_tables
@@ -81,13 +81,28 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights", "orchestration",
+                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive",
             }
             assert tables("domestic") == tables("foreign") == set()
+            command.downgrade(central, "014_durable_workflow")
+            with psycopg.connect(conninfo(databases["central"])) as legacy:
+                legacy.execute("""
+                    INSERT INTO insights.executive_reports (subject_id,report_id,slot,payload,evidence)
+                    VALUES ('fixture-legacy','fixture-legacy',5,
+                        '{"visibility":"executive_private","report_id":"fixture-legacy",
+                          "publishable":false,"owner_role":"editor_in_chief"}'::jsonb,'[]'::jsonb)
+                """)
+            with pytest.raises(DBAPIError, match="legacy private reports require encrypted migration"):
+                command.upgrade(central, "head")
+            with psycopg.connect(conninfo(databases["central"])) as legacy:
+                assert legacy.execute("SELECT count(*) FROM insights.executive_reports").fetchone()[0] == 1
+                legacy.execute("DELETE FROM insights.executive_reports WHERE subject_id='fixture-legacy'")
+            command.upgrade(central, "head")
+            assert tables("central") == central_tables
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -1032,6 +1047,69 @@ def _exercise_image_workspace(central):
     finally:
         services.registry.dispose()
 
+def _private_report_fixture(services):
+    import base64
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    from sqlalchemy import create_engine
+
+    from backend.modules.intelligence.report_repository import ReportRepository
+    from backend.modules.intelligence.repository import build_executive_store
+
+    admin = make_url(os.environ["ETEMAD_DB_CENTRAL_URL"])
+    suffix = uuid4().hex[:12]
+    public_role, private_role = f"fixture_public_{suffix}", f"fixture_private_{suffix}"
+    password = "fixture-only-isolated-report-test"
+    admin_url = admin.set(drivername="postgresql").render_as_string(hide_password=False)
+    with psycopg.connect(admin_url) as conn:
+        for role in (public_role, private_role):
+            conn.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {}").format(
+                sql.Identifier(role), sql.Literal(password)))
+        conn.execute(sql.SQL("GRANT USAGE ON SCHEMA insights TO {}").format(sql.Identifier(public_role)))
+        conn.execute(sql.SQL("GRANT SELECT, INSERT ON insights.public_report_drafts TO {}").format(
+            sql.Identifier(public_role)))
+        conn.execute(sql.SQL("GRANT USAGE ON SCHEMA executive TO {}").format(sql.Identifier(private_role)))
+        conn.execute(sql.SQL("GRANT SELECT, INSERT ON executive.private_reports TO {}").format(
+            sql.Identifier(private_role)))
+    public_url = admin.set(username=public_role, password=password)
+    private_url = admin.set(username=private_role, password=password)
+    public = create_engine(public_url)
+    private = create_engine(private_url)
+    root = services.objects.root.parent / "executive-fixture"
+    encoded = base64.b64encode(AESGCM.generate_key(bit_length=256)).decode()
+    env = {"ETEMAD_EXECUTIVE_DB_URL": private_url.render_as_string(hide_password=False),
+           "ETEMAD_EXECUTIVE_OBJECT_ROOT": str(root), "ETEMAD_SECRET_EXECUTIVE_REPORTS_KEY": encoded}
+    store = build_executive_store(public, services.objects, env)
+    assert store is not None
+    services.reports = ReportRepository(public, services.grants, private=store)
+
+    # Real application composition must activate private storage only with
+    # a distinct, least-privileged connection and disjoint encrypted root.
+    from backend.app.dependencies import build_services
+
+    settings = {**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key",
+        "ETEMAD_DB_CENTRAL_URL": public_url.render_as_string(hide_password=False)}
+    configured = build_services(environ={**settings, **env})
+    assert configured.reports is not None and configured.reports.private_available
+    configured.reports.close()
+    configured.registry.dispose()
+    invalid = build_services(environ={**settings, **env, "ETEMAD_SECRET_EXECUTIVE_REPORTS_KEY": "invalid"})
+    assert invalid.reports is not None and not invalid.reports.private_available
+    invalid.registry.dispose()
+
+    def cleanup():
+        store.close()
+        public.dispose()
+        private.dispose()
+        with psycopg.connect(admin_url) as conn:
+            for role in (public_role, private_role):
+                conn.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(role)))
+                conn.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(role)))
+    return store, public, private, root, env, cleanup
+
+
 def _exercise_analysis_workspace(central):
     from fastapi.testclient import TestClient
 
@@ -1043,6 +1121,7 @@ def _exercise_analysis_workspace(central):
     services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
         "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
         "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    private_cleanup = None
     principal = Principal("fixture-analysis-staff", "staff")
     headers = {"Authorization": "Bearer " + issue_session(principal, services.session_key)}
     source = {"source_id": "SRC-ANALYSIS-ONE", "site_url": "https://example.invalid/analysis",
@@ -1169,11 +1248,73 @@ def _exercise_analysis_workspace(central):
             for slot in (5, 6, 7):
                 services.grants.grant(Grant(eic.subject_id, eic.role, "private_report", f"slot-{slot}", "read"))
             services.switches = lambda: off
+            assert client.get(daily + "/5", headers=eic_headers).status_code == 503
+            assert client.post(daily + "/5", headers=eic_headers, json=daily_input).status_code == 503
+            assert not any(v["generation_enabled"] for v in client.get(daily, headers=eic_headers).json()["slots"])
+            store, public_engine, private_engine, private_root, private_env, private_cleanup = _private_report_fixture(services)
             for slot in (5, 6, 7):
                 created = client.post(f"{daily}/{slot}", headers=eic_headers, json=daily_input)
                 assert created.status_code == 200 and created.json()["saved"]["payload"]["publishable"] is False
                 assert client.get(f"{daily}/{slot}", headers=eic_headers).json()["saved"] == created.json()["saved"]
                 assert client.get(f"{daily}/{slot}", headers=headers).status_code == 404
+            import base64
+
+            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+            from backend.modules.intelligence.report_repository import ReportRepository
+            from backend.modules.intelligence.repository import (
+                ExecutiveStorageUnavailable,
+                build_executive_store,
+            )
+
+            with pytest.raises(DBAPIError):
+                with public_engine.connect() as conn:
+                    conn.execute(text("SELECT * FROM executive.private_reports"))
+            with pytest.raises(DBAPIError):
+                with private_engine.connect() as conn:
+                    conn.execute(text("SELECT * FROM insights.public_report_drafts"))
+            with pytest.raises(DBAPIError):
+                with private_engine.begin() as conn:
+                    conn.execute(text("DELETE FROM executive.private_reports"))
+            with pytest.raises(ExecutiveStorageUnavailable):
+                build_executive_store(public_engine, services.objects, {
+                    **private_env, "ETEMAD_EXECUTIVE_OBJECT_ROOT": str(services.objects.root)})
+            with pytest.raises(ExecutiveStorageUnavailable):
+                build_executive_store(public_engine, services.objects, {
+                    **private_env, "ETEMAD_EXECUTIVE_DB_URL": public_engine.url.render_as_string(hide_password=False)})
+            with private_engine.connect() as conn:
+                rows = conn.execute(text("SELECT content_ref FROM executive.private_reports")).scalars().all()
+                assert len(rows) == 3
+            assert not any(p.is_file() for p in services.objects.root.glob("reports/*.bin"))
+            for ref in rows:
+                data = (private_root / ref).read_bytes()
+                assert b"Atlas" not in data and b"publishable" not in data and data.startswith(b"ETEMAD-P19-v1")
+            # Verify wrong-key and changed-object rejection, and restart access.
+            wrong = build_executive_store(public_engine, services.objects, {
+                **private_env, "ETEMAD_SECRET_EXECUTIVE_REPORTS_KEY": base64.b64encode(
+                    AESGCM.generate_key(bit_length=256)).decode()})
+            assert wrong is not None
+            try:
+                with pytest.raises(ValueError, match="integrity"):
+                    wrong.latest(eic.subject_id, 5)
+            finally:
+                wrong.close()
+            with private_engine.connect() as conn:
+                target = conn.execute(text("SELECT content_ref FROM executive.private_reports WHERE slot=5")).scalar_one()
+            file = private_root / target
+            original = file.read_bytes()
+            file.write_bytes(original[:-1] + bytes([original[-1] ^ 1]))
+            assert client.get(daily + "/5", headers=eic_headers).status_code == 422
+            file.write_bytes(original)
+            reopened = build_executive_store(public_engine, services.objects, private_env)
+            assert reopened is not None
+            try:
+                assert reopened.latest(eic.subject_id, 5) == store.latest(eic.subject_id, 5)
+                other = Principal("fixture-other-eic", "editor_in_chief")
+                services.grants.grant(Grant(other.subject_id, other.role, "private_report", "slot-5", "read"))
+                assert ReportRepository(public_engine, services.grants, private=reopened).latest(other, 5) is None
+            finally:
+                reopened.close()
             services.grants.revoke(Grant(eic.subject_id, eic.role, "private_report", "slot-5", "read"))
             assert client.get(daily + "/5", headers=eic_headers).status_code == 404
             from alembic import command
@@ -1185,7 +1326,7 @@ def _exercise_analysis_workspace(central):
             with services.registry.engine("central").begin() as conn:
                 conn.execute(text("DELETE FROM insights.public_report_drafts WHERE subject_id=:id"),
                              {"id": principal.subject_id})
-                conn.execute(text("DELETE FROM insights.executive_reports WHERE subject_id=:id"),
+                conn.execute(text("DELETE FROM executive.private_reports WHERE subject_id=:id"),
                              {"id": eic.subject_id})
             services.switches = lambda: off
             assert client.post(report_path, headers=headers, json=payload).status_code == 422
@@ -1197,6 +1338,8 @@ def _exercise_analysis_workspace(central):
             services.sources.set_enabled(source["source_id"], False)
             assert client.post("/v1/analysis/run", headers=headers, json=payload).json()["result"] is None
     finally:
+        if private_cleanup is not None:
+            private_cleanup()
         services.registry.dispose()
 
 

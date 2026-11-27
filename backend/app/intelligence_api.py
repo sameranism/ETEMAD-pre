@@ -30,6 +30,7 @@ from backend.modules.intelligence.chat_memory import PostgresChatMemory
 from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
 from backend.modules.intelligence.private_reports import PRIVATE_SLOTS, build_private_report
 from backend.modules.intelligence.public_reports import PUBLIC_SLOTS, build_public_report
+from backend.modules.intelligence.repository import ExecutiveStorageUnavailable
 from backend.modules.intelligence.retrieval import retrieve
 
 
@@ -290,7 +291,7 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
         slots = [{"slot": i, "title": title, "private": False,
                   "generation_enabled": services.switches().enabled(PUBLIC_ANALYSIS)}
                  for i, (_, title) in PUBLIC_SLOTS.items()]
-        slots += [{"slot": i, "title": title, "private": True, "generation_enabled": True}
+        slots += [{"slot": i, "title": title, "private": True, "generation_enabled": services.reports is not None and services.reports.private_available}
                   for i, (_, title) in PRIVATE_SLOTS.items()
                   if decide_access(principal.subject_id, principal.role, "private_report", f"slot-{i}",
                                    "read", services.grants, classification="executive_private")["allowed"] is True]
@@ -302,7 +303,7 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
                        principal: Principal = Depends(principal_dep),
                        services: Services = Depends(services_dep)) -> dict[str, Any]:
         report_access(slot, request, principal, services)
-        if services.reports is None:
+        if services.reports is None or (slot in PRIVATE_SLOTS and not services.reports.private_available):
             raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
         if slot in PUBLIC_SLOTS and not services.switches().enabled(PUBLIC_ANALYSIS):
             raise APIError(ErrorCode.INVALID_STATE)
@@ -320,6 +321,8 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
                         if result is not None and item.artifact_id in result["source_refs"]]
             report_access(slot, request, principal, services)
             saved = services.reports.save(principal, slot, result, evidence) if result is not None else None
+        except ExecutiveStorageUnavailable:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE) from None
         except PermissionError:
             raise APIError(ErrorCode.NOT_FOUND) from None
         except ValueError:
@@ -333,7 +336,8 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
                    principal: Principal = Depends(principal_dep),
                    services: Services = Depends(services_dep)) -> dict[str, Any]:
         report_access(slot, request, principal, services)
-        if services.reports is None or services.news_archive is None:
+        if (services.reports is None or services.news_archive is None
+                or (slot in PRIVATE_SLOTS and not services.reports.private_available)):
             raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE)
         try:
             saved = services.reports.latest(principal, slot)
@@ -350,6 +354,8 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
                                for v in versions) or source["license_scope"] not in {"metadata", "summary", "full_text"}:
                         raise APIError(ErrorCode.FORBIDDEN)
                 report_access(slot, request, principal, services)
+        except ExecutiveStorageUnavailable:
+            raise APIError(ErrorCode.DEPENDENCY_UNAVAILABLE) from None
         except (PermissionError, SourceNotAllowed, SourceNotFound):
             raise APIError(ErrorCode.NOT_FOUND) from None
         except ValueError:

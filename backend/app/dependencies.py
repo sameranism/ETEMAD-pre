@@ -61,6 +61,10 @@ from backend.modules.editorial.image_repository import ImageRepository
 from backend.modules.editorial.repository import EditorialRepository
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
 from backend.modules.intelligence.report_repository import ReportRepository
+from backend.modules.intelligence.repository import (
+    ExecutiveStorageUnavailable,
+    build_executive_store,
+)
 from backend.modules.processing.repository import PostgresProcessingRepository, ProcessingRepository
 from backend.modules.publishing.repository import PostgresFixtureLedger
 
@@ -264,6 +268,18 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         private_identity=accounts is not None, persistent_sources=source_storage == "postgres",
     )
 
+    reports = None
+    if storage == "postgres":
+        central_engine = registry.engine("central")
+        try:
+            private_reports = build_executive_store(central_engine, objects, environ)
+        except ExecutiveStorageUnavailable:
+            # One private storage failure must not stop unrelated newsroom work.
+            # Do not log a connection URL, credentials, or the encryption key.
+            _LOG.error("executive storage unavailable; private reports disabled")
+            private_reports = None
+        reports = ReportRepository(central_engine, grant_store, private=private_reports)
+
     return Services(
         registry=registry,
         session_key=session_key,
@@ -285,7 +301,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         news_archive=news_archive,
         workflow_jobs=workflow_jobs,
         publication_ledger=PostgresFixtureLedger(registry.engine("central")) if storage == "postgres" else None,
-        reports=ReportRepository(registry.engine("central"), grant_store) if storage == "postgres" else None,
+        reports=reports,
         chat_memory=PostgresChatMemory(registry.engine("central")) if storage == "postgres" else None,
         images=ImageRepository(registry.engine("central"), objects) if storage == "postgres" else None,
         editorial_generator=generator,
