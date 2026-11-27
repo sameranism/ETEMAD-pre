@@ -68,7 +68,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 26
+            assert len(central_tables) == 27
+            assert ("ui", "saved_views") in central_tables
             assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
             assert {("insights", "public_report_drafts"), ("executive", "private_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
@@ -81,7 +82,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive",
+                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive", "ui",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "014_durable_workflow")
@@ -102,7 +103,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive", "ui"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -152,12 +153,118 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_publication_queue(central)
             _exercise_ai_cost_ledger()
             _exercise_workflow_handoff(central)
+            _exercise_role_dashboards(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
         finally:
             for database in reversed(created):
                 control.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+
+
+def _exercise_role_dashboards(central):
+    from alembic import command
+    from fastapi.testclient import TestClient
+
+    from backend.app.dependencies import build_services
+    from backend.app.main import create_app
+    from backend.core.auth import Principal, issue_session
+    from backend.core.permissions import Grant
+    from backend.modules.ui.saved_views import SavedViews
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    source = {"source_id": "SRC-DASHBOARD-TEST", "site_url": "https://example.invalid/dash",
+        "feed_url": "https://example.invalid/dash/rss", "country": "IR", "language": "fa",
+        "stream": "domestic", "license_scope": "summary", "enabled": True}
+    raw = {"schema_version": "1.0", "news_id": "NEWS-DASHBOARD-ECONOMY", "stream": "domestic",
+        "source_id": source["source_id"], "original_url": "https://example.invalid/dash/1",
+        "original_title": "بورس آزمایشی", "original_text": "بورس و تورم", "language": "fa",
+        "subject_countries": [], "collected_at": "2026-11-27T00:00:00Z",
+        "content_scope": "summary", "reuse_permission": "unverified"}
+    staff = Principal("fixture-dash-staff", "staff")
+    other = Principal("fixture-dash-other", "staff")
+    eic = Principal("fixture-dash-eic", "editor_in_chief")
+    owner = Principal("fixture-dash-owner", "owner")
+
+    def header(p):
+        return {"Authorization": "Bearer " + issue_session(p, services.session_key)}
+
+    def grant(p, kind, key, action):
+        services.grants.grant(Grant(p.subject_id, p.role, kind, key, action))
+
+    try:
+        services.sources.register(source)
+        services.pipeline.process(raw)
+        sports = {**raw, "news_id": "NEWS-DASHBOARD-SPORTS", "original_title": "فوتبال آزمایشی",
+                   "original_text": "لیگ فوتبال", "original_url": "https://example.invalid/dash/2"}
+        services.pipeline.process(sports)
+        grant(staff, "desk", "economy", "read")
+        grant(other, "desk", "economy", "read")
+        for p in (staff, eic):
+            grant(p, "newsroom", "feed", "read")
+            for item in (raw, sports):
+                grant(p, "newsroom", item["news_id"], "read")
+                grant(p, "editorial_workspace", item["news_id"], "read")
+        with TestClient(create_app(services=services)) as client:
+            ui = "/v1/ui"
+            assert client.get(ui + "/session").status_code == 401
+            for p in (staff, eic, owner):
+                assert client.get(ui + "/session", headers=header(p)).json()["role"] == p.role
+            for p, forbidden in ((staff, "owner-dashboard"), (staff, "editor-dashboard"),
+                                 (eic, "owner-dashboard"), (eic, "staff-dashboard"),
+                                 (owner, "editor-dashboard"), (owner, "staff-dashboard")):
+                assert client.get(ui + "/" + forbidden, headers=header(p)).status_code == 403
+            staff_page = client.get(ui + "/staff-dashboard", headers=header(staff))
+            assert staff_page.status_code == 200 and staff_page.headers["Cache-Control"] == "no-store"
+            body = staff_page.json()
+            assert body["desks"] == ["economy"]
+            assert [x["news_id"] for x in body["items"]] == [raw["news_id"]]
+            assert [x["news_id"] for x in body["tasks"]] == [raw["news_id"]]
+            assert "NEWS-DASHBOARD-SPORTS" not in staff_page.text
+            assert "metrics_snapshot" not in body and "operations" not in body and "private_reports" not in body
+            assert client.get(ui + "/desk/sports", headers=header(staff)).status_code == 403
+            assert client.get(ui + "/desk/economy?stream=foreign", headers=header(staff)).json()["items"] == []
+            assert [x["news_id"] for x in client.get("/v1/news", headers=header(staff)).json()["items"]] == [raw["news_id"]]
+            executive = client.get(ui + "/editor-dashboard", headers=header(eic)).json()
+            assert {x["news_id"] for x in executive["items"]} == {raw["news_id"], sports["news_id"]}
+            assert executive["metrics_snapshot"] is None
+            assert client.get(ui + "/owner-dashboard", headers=header(owner)).json()["operations"] == {}
+            for kind, key, action in (("operations","default","read"), ("source_registry","default","read"),
+                                       ("config","output_controls:global:controls-main","read"),
+                                       ("ai_cost","default","read"), ("audit","default","read")):
+                grant(owner, kind, key, action)
+            ops = client.get(ui + "/owner-dashboard", headers=header(owner)).json()["operations"]
+            assert ops["health"] == {"central":"ok","domestic":"ok","foreign":"ok"}
+            assert ops["controls"]["can_update"] is False
+            assert ops["ai_cost"]["committed_usd"] >= 0
+            assert ops["sources"]["registered"] >= 1
+            assert "private_report" not in str(ops)
+            saved_path = ui + "/saved-views"
+            form = {"name":"آزمایش", "desk":"economy", "stream":"domestic"}
+            assert client.put(saved_path, json={**form, "desk":"sports"}, headers=header(staff)).status_code == 403
+            saved = client.put(saved_path, json=form, headers=header(staff))
+            assert saved.status_code == 200, saved.text
+            row = saved.json()["saved"]
+            assert client.get(saved_path, headers=header(other)).json()["items"] == []
+            assert client.delete(saved_path+"/"+row["view_id"], headers=header(other)).status_code == 404
+            second = DatabaseRegistry()
+            try:
+                assert SavedViews(second.engine("central")).list(staff) == [row]
+            finally:
+                second.dispose()
+            replay = client.put(saved_path, json={**form, "stream":"all"}, headers=header(staff)).json()["saved"]
+            assert replay["view_id"] == row["view_id"]
+            services.grants.revoke(Grant(staff.subject_id, staff.role, "desk", "economy", "read"))
+            assert client.get(saved_path, headers=header(staff)).json()["items"] == []
+            assert client.get(ui + "/desk/economy", headers=header(staff)).status_code == 403
+            assert client.get("/v1/news", headers=header(staff)).json()["items"] == []
+            with pytest.raises(DBAPIError, match="saved views are not empty"):
+                command.downgrade(central, "015_executive_storage")
+            assert client.delete(saved_path+"/"+row["view_id"], headers=header(staff)).status_code == 200
+    finally:
+        services.registry.dispose()
 
 
 def _clear_workflow_test_rows(registry):
@@ -743,6 +850,12 @@ def _exercise_foreign_dashboard():
             for field in ("raw_count", "delivered_count", "received_count", "processed_count"):
                 assert after[field] == initial[field] + 1
             assert all(candidate["enabled"] is False for candidate in after["candidates"])
+            assert client.get("/v1/news", headers=headers).json()["items"] == []
+            for item in services.pipeline.feed(limit=200):
+                if item["source_id"] == source["source_id"]:
+                    services.grants.grant(Grant("fixture-staff", "staff", "newsroom", item["news_id"], "read"))
+                    for desk in item["desks"]:
+                        services.grants.grant(Grant("fixture-staff", "staff", "desk", desk, "read"))
             news = client.get("/v1/news", headers=headers).json()
             assert sum(item["source_id"] == source["source_id"] and item["stream"] == "foreign"
                        for item in news["items"]) == 1

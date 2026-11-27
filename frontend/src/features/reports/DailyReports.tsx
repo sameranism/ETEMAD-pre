@@ -33,7 +33,8 @@ function parseSaved(x: unknown, slot: Slot): Saved | null {
   return saved as Saved;
 }
 
-export default function DailyReports({ token }: { token: string }) {
+export default function DailyReports({ token, visibility = "public" }:
+  { token: string; visibility?: "public" | "private" }) {
   const [slots, setSlots] = useState<Slot[]>([]);
   const [results, setResults] = useState<Record<number, Saved | null>>({});
   const [messages, setMessages] = useState<Record<number, string>>({});
@@ -46,12 +47,12 @@ export default function DailyReports({ token }: { token: string }) {
     setLoaded(false); setSlots([]); setResults({}); setMessages({});
     fetch(path, { signal: controller.signal, credentials: "same-origin", cache: "no-store",
       redirect: "error", headers: { Authorization: "Bearer " + token } })
-      .then(async r => { if (!r.ok) return []; return parseSlots(await r.json()); })
+      .then(async r => { if (!r.ok) return []; return parseSlots(await r.json()).filter(slot => slot.private === (visibility === "private")); })
       .then(rows => { if (!controller.signal.aborted) setSlots(rows); })
       .catch(() => { if (!controller.signal.aborted) setSlots([]); })
       .finally(() => { if (!controller.signal.aborted) setLoaded(true); });
     return () => active.current?.abort();
-  }, [token]);
+  }, [token, visibility]);
   async function run(selected: Slot[], method: "GET" | "POST") {
     if (busy) return;
     const controller = new AbortController(); active.current = controller;
@@ -84,8 +85,8 @@ export default function DailyReports({ token }: { token: string }) {
   }
   if (!loaded || !slots.length) return null;
   return <section className="news-desk" aria-label="مرکز گزارش‌های مدیریتی">
-    <h2>گزارش‌های مدیریتی</h2>
-    <p>پیش‌نویس روزانه از حداکثر ۲۰ سند مجاز؛ بدون ادعای پوشش کامل یا مجوز انتشار. گزارش محرمانه فقط برای کاربر مجاز است.</p>
+    <h2>{visibility === "private" ? "گزارش‌های محرمانه مدیرمسئول" : "گزارش‌های عمومی"}</h2>
+    <p>پیش‌نویس روزانه از حداکثر ۲۰ سند مجاز؛ بدون ادعای پوشش کامل یا مجوز انتشار. {visibility === "private" && " این گزارش‌ها غیرقابل انتشار هستند."}</p>
     <button type="button" disabled={busy || !slots.some(s => s.generation_enabled)}
       onClick={() => void run(slots.filter(s => s.generation_enabled), "POST")}>ساخت همه گزارش‌های مجاز ۲۴ ساعت اخیر</button>
     <button type="button" disabled={busy} onClick={() => void run(slots, "GET")}>بازیابی آخرین گزارش‌های ذخیره‌شده</button>
@@ -94,7 +95,7 @@ export default function DailyReports({ token }: { token: string }) {
       <h3>{slot.title} {slot.private && " · محرمانه"}</h3>
       <button type="button" disabled={busy || !slot.generation_enabled}
         onClick={() => void run([slot], "POST")}>ساخت و ذخیره گزارش</button>
-      {!slot.generation_enabled && <p>تولید گزارش عمومی در کنترل‌های خروجی غیرفعال است.</p>}
+      {!slot.generation_enabled && <p>{slot.private ? "مخزن گزارش محرمانه در دسترس نیست." : "تولید گزارش عمومی در کنترل‌های خروجی غیرفعال است."}</p>}
       <button type="button" disabled={busy} onClick={() => void run([slot], "GET")}>آخرین نسخه ذخیره‌شده</button>
       {messages[slot.slot] && <p role="status">{messages[slot.slot]}</p>}
       {results[slot.slot] && <div>
