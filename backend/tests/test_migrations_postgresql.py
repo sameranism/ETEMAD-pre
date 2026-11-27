@@ -68,13 +68,14 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 28
+            assert len(central_tables) == 29
             assert ("ui", "saved_views") in central_tables
             assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
             assert {("insights", "public_report_drafts"), ("executive", "private_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
             assert ("insights", "metric_snapshots") in central_tables
+            assert ("insights", "analyses") in central_tables
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
@@ -1369,8 +1370,9 @@ def _exercise_analysis_workspace(central):
             assert history.json()["result"] == body["result"]
             assert history.json()["evidence"] == body["evidence"]
             assert client.post("/v1/analysis/run", headers=headers, json=payload).json()["result"] == body["result"]
-            from backend.modules.intelligence.analysis_store import PostgresAnalysisHistory
             from alembic import command
+
+            from backend.modules.intelligence.analysis_store import PostgresAnalysisHistory
             history_registry = DatabaseRegistry()
             try:
                 store = PostgresAnalysisHistory(history_registry.engine("central"))
