@@ -1,3 +1,4 @@
+import { parseImages } from "../src/features/images/ImageWorkspace";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -268,5 +269,20 @@ describe("archive search", () => {
     const html = renderToStaticMarkup(createElement(ArchiveSearch, { token: "fixture-not-real" }));
     expect(html).toContain("جست‌وجو در آرشیو مجاز");
     expect(html).not.toContain("fixture-not-real");
+  });
+});
+
+describe("internal image renditions", () => {
+  it("accepts only same-revision nonpublishable records", () => {
+    const response = { schema_version: "1.0", article_version: 2, items: [{
+      image_id: "IMG-" + "a".repeat(32), article_version: 2,
+      manifest: { schema_version: "1.0", assets: [{ width: 1200, height: 675, format: "webp",
+        license_status: "unknown", ai_generated: true, alt_text: "نمونه" }] },
+      evidence: { publication_eligible: false },
+    }] };
+    expect(parseImages(response, 2)).toHaveLength(1);
+    expect(() => parseImages(response, 3)).toThrow();
+    expect(() => parseImages({ ...response, items: [{ ...response.items[0],
+      evidence: { publication_eligible: true } }] }, 2)).toThrow();
   });
 });

@@ -68,7 +68,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 17
+            assert len(central_tables) == 18
+            assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
             assert ("processing", "foreign_inbox") in central_tables
@@ -126,6 +127,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_editorial_workspace(central)
             _exercise_foreign_dashboard()
             _exercise_archive_workspace(central)
+            _exercise_image_workspace(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -764,5 +766,69 @@ def _exercise_archive_workspace(central):
                 reopened.capture(raw)
         with pytest.raises(DBAPIError, match="news archive is not empty"):
             command.downgrade(central, "007_editorial_revisions")
+    finally:
+        services.registry.dispose()
+
+def _exercise_image_workspace(central):
+    import base64
+    from io import BytesIO
+
+    from alembic import command
+    from fastapi.testclient import TestClient
+    from PIL import Image
+
+    from backend.app.dependencies import build_services
+    from backend.app.main import create_app
+    from backend.core.auth import Principal, issue_session
+    from backend.core.permissions import Grant
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    news_id = "NEWS-EDITORIAL-FIXTURE"
+    source_id = "SRC-EDITORIAL-FIXTURE"
+    principal = Principal("fixture-image-staff", "staff")
+    headers = {"Authorization": "Bearer " + issue_session(principal, services.session_key)}
+    path = "/v1/editorial/news/" + news_id + "/images"
+    services.sources.set_enabled(source_id, True)
+    buffer = BytesIO()
+    Image.new("RGB", (200, 100), "blue").save(buffer, format="PNG")
+    payload = {"article_version": 3, "image_data": base64.b64encode(buffer.getvalue()).decode("ascii"),
+               "alt_text": "نمونه آزمایشی", "source_ref": "fixture:uploaded-image", "origin": "ai_declared",
+               "rights_ref": "fixture:unverified-claim", "profiles": ["landscape", "square", "portrait"]}
+    try:
+        with TestClient(create_app(services=services)) as client:
+            assert client.get(path + "?version=3").status_code == 401
+            assert client.get(path + "?version=3", headers=headers).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "newsroom", news_id, "read"))
+            services.grants.grant(Grant(principal.subject_id, "staff", "editorial_workspace", news_id, "read"))
+            assert client.get(path + "?version=3", headers=headers).json()["items"] == []
+            services.grants.grant(Grant(principal.subject_id, "staff", "editorial_workspace", news_id, "write"))
+            assert client.post(path, headers=headers, json=payload).status_code == 403
+            services.grants.grant(Grant(principal.subject_id, "staff", "editorial_workspace", news_id, "prepare_image"))
+            assert client.post(path, headers=headers, json={**payload, "license_status": "verified"}).status_code == 400
+            assert client.post(path, headers=headers, json={**payload, "article_version": 2}).status_code == 409
+            result = client.post(path, headers=headers, json=payload)
+            assert result.status_code == 200, result.text
+            saved = result.json()["saved"]
+            assert saved["article_version"] == 3 and len(saved["manifest"]["assets"]) == 3
+            assert not saved["evidence"]["publication_eligible"]
+            assert all(a["license_status"] == "unknown" and a["ai_generated"] for a in saved["manifest"]["assets"])
+            assert client.post(path, headers=headers, json=payload).json()["saved"] == saved
+            assert client.get(path + "?version=2", headers=headers).json()["items"] == []
+            assert client.get(path + "?version=3", headers=headers).json()["items"] == [saved]
+            asset_path = path + "/" + saved["image_id"] + "/0"
+            assert client.get(asset_path + "?version=2", headers=headers).status_code == 404
+            response = client.get(asset_path + "?version=3", headers=headers)
+            assert response.status_code == 200 and response.headers["content-type"] == "image/webp"
+            assert Image.open(BytesIO(response.content)).size == (1200, 675)
+            assert response.headers["Cache-Control"] == "no-store"
+            services.sources.set_enabled(source_id, False)
+            assert client.get(asset_path + "?version=3", headers=headers).status_code == 403
+        engine = services.registry.engine("central")
+        engine.dispose()
+        assert services.images.list(news_id, 3) == [saved]
+        with pytest.raises(DBAPIError, match="image history is not empty"):
+            command.downgrade(central, "008_news_archive")
     finally:
         services.registry.dispose()
