@@ -15,11 +15,13 @@ from backend.app.dependencies import Services
 from backend.core.archive import ArchiveIntegrityError
 from backend.core.auth import Principal
 from backend.core.errors import APIError, ErrorCode
+from backend.core.output_switches import PUBLIC_ANALYSIS
 from backend.core.permissions import decide_access
 from backend.core.sources_service import SourceNotAllowed, SourceNotFound
 from backend.modules.intelligence.analysis import analyze
 from backend.modules.intelligence.chat import answer_question
 from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
+from backend.modules.intelligence.public_reports import PUBLIC_SLOTS, build_public_report
 from backend.modules.intelligence.retrieval import retrieve
 
 
@@ -113,6 +115,30 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
         bundle = bundle_for(payload, request, principal, services, "chat")
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "mode": "extractive", "result": answer_question(payload.query, bundle),
+                "evidence": [item.reference() for item in bundle.evidence], "bounded": bundle.bounded}
+
+    @router.post("/reports/{slot}")
+    def report(slot: int, payload: EvidenceInput, request: Request, response: Response,
+               principal: Principal = Depends(principal_dep),
+               services: Services = Depends(services_dep)) -> dict[str, Any]:
+        # Only the four PUBLIC slots are exposed here, never private reports.
+        if slot not in PUBLIC_SLOTS:
+            raise APIError(ErrorCode.NOT_FOUND)
+        authorize(services, principal, resource_type="analysis_workspace", resource_id="default",
+                  action="report", correlation_id=correlation_id(request))
+        if not services.switches().enabled(PUBLIC_ANALYSIS):
+            raise APIError(ErrorCode.INVALID_STATE)
+        stream = {1: "domestic", 2: "foreign"}.get(slot)
+        if stream is not None and payload.stream not in (None, stream):
+            raise APIError(ErrorCode.CONTRACT_INVALID)
+        scoped = payload.model_copy(update={"stream": stream}) if stream else payload
+        bundle = bundle_for(scoped, request, principal, services, "report")
+        switches = services.switches()
+        if not switches.enabled(PUBLIC_ANALYSIS):
+            raise APIError(ErrorCode.INVALID_STATE)
+        result = build_public_report(slot, bundle, switches=switches)
+        response.headers["Cache-Control"] = "no-store"
+        return {"schema_version": "1.0", "mode": "bounded_draft", "result": result,
                 "evidence": [item.reference() for item in bundle.evidence], "bounded": bundle.bounded}
 
     return router

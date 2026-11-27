@@ -1,4 +1,4 @@
-import PoliticalAnalysis, { composeChatQuery, parseAnalysis } from "../src/features/analysis/PoliticalAnalysis";
+import PoliticalAnalysis, { composeChatQuery, parseAnalysis, parseReport } from "../src/features/analysis/PoliticalAnalysis";
 import { parseImages } from "../src/features/images/ImageWorkspace";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -306,5 +306,22 @@ describe("archive-backed intelligence", () => {
     expect(() => parseAnalysis({ ...base, result: { ...base.result, source_refs: ["unknown"] } }, "run")).toThrow();
     expect(() => parseAnalysis({ ...base, evidence: [{ ...evidence[0], stream: "executive_private" }] }, "run")).toThrow();
     expect(renderToStaticMarkup(createElement(PoliticalAnalysis, { token: "fixture-not-real" }))).not.toContain("fixture-not-real");
+  });
+});
+
+
+describe("public draft report workspace", () => {
+  it("accepts only bounded public drafts and rejects unauthorized references", () => {
+    const ref = "raw-" + "a".repeat(64);
+    const evidence = [{ source_ref: ref, news_id: "NEWS-ONE", title: "شاهد", original_url: "https://example.invalid/one",
+      collected_at: "2026-11-27T00:00:00Z", stream: "foreign", text_redacted: false }];
+    const result = { schema_version: "1.0", visibility: "public", generation_status: "draft",
+      created_by_project: "P18", report_type: "foreign_digest", title: "مرور اخبار جهان",
+      source_refs: [ref], sections: [{ heading: "منبع", body: "شاهد", source_refs: [ref] }] };
+    const envelope = { schema_version: "1.0", mode: "bounded_draft", bounded: true, evidence, result };
+    expect(parseReport(envelope).result?.title).toBe(result.title);
+    expect(() => parseReport({ ...envelope, result: { ...result, visibility: "executive_private" } })).toThrow();
+    expect(() => parseReport({ ...envelope, result: { ...result, generation_status: "completed" } })).toThrow();
+    expect(() => parseReport({ ...envelope, result: { ...result, sections: [{ ...result.sections[0], source_refs: ["unknown"] }] } })).toThrow();
   });
 });
