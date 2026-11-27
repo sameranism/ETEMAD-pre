@@ -41,7 +41,7 @@ class GeneratedDraft:
 class EditorialGenerator:
     def __init__(
         self, gateway: Gateway, profiles: Mapping[tuple[str, str], EditorialProfile],
-        *, mode: Literal["fixture", "live"],
+        *, mode: Literal["fixture", "live"], approved_source_ids: frozenset[str] = frozenset(),
     ) -> None:
         import json
 
@@ -49,6 +49,7 @@ class EditorialGenerator:
             raise ValueError("invalid generation mode")
         self._gateway = gateway
         self.mode = mode
+        self._approved_source_ids = approved_source_ids
         self._profiles: dict[tuple[str, str], EditorialProfile] = {}
         for (stream, desk), profile in profiles.items():
             rules = json.loads(canonical(profile.ruleset))
@@ -63,7 +64,8 @@ class EditorialGenerator:
         tasks = ["editorial"]
         if raw["stream"] == "foreign" and raw["language"] != "fa":
             tasks.append("translation")
-        return ((self.mode != "live" or raw["reuse_permission"] == "licensed")
+        return ((self.mode != "live" or (raw["reuse_permission"] == "licensed"
+                    and raw["source_id"] in self._approved_source_ids))
                 and self._gateway.enabled and (raw["stream"], desk) in self._profiles
                 and all(task in self._gateway.bindings for task in tasks))
 
