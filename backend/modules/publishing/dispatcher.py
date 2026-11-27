@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Protocol
 
 from backend.adapters.base import Delivery
 from backend.adapters.registry import AdapterRegistry
@@ -16,6 +16,10 @@ from backend.core.output_switches import OutputSwitches
 from backend.modules.publishing.destinations import Destination
 from backend.modules.publishing.formatter import format_text
 from backend.modules.publishing.scheduler import ApprovedContent, stamp
+
+
+class AttemptLedger(Protocol):
+    def once(self, key: tuple[str, str], operation: Callable[[], Delivery]) -> Delivery: ...
 
 
 class FixtureLedger:
@@ -34,7 +38,7 @@ class FixtureLedger:
 
 def dispatch_fixture(
     job: Mapping[str, Any], *, approval_for: Callable[[], ApprovedContent | None],
-    destinations: Mapping[str, Destination], adapters: AdapterRegistry, ledger: FixtureLedger,
+    destinations: Mapping[str, Destination], adapters: AdapterRegistry, ledger: AttemptLedger,
     switches: Callable[[], OutputSwitches], now: Callable[[], datetime], dry_run: bool = True,
 ) -> dict[str, Any]:
     validate_payload("publication_job", job)

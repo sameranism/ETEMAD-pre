@@ -68,7 +68,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 18
+            assert len(central_tables) == 20
             assert ("editorial", "image_assets") in central_tables
             assert {("archive", "news_records"), ("archive", "artifact_index")} <= central_tables
             assert {("editorial", "articles"), ("editorial", "translations")} <= central_tables
@@ -77,13 +77,13 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources", "editorial", "archive",
+                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive"} and row != ("identity", "login_throttle")
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish"} and row != ("identity", "login_throttle")
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -129,6 +129,7 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_archive_workspace(central)
             _exercise_image_workspace(central)
             _exercise_analysis_workspace()
+            _exercise_publication_queue(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
@@ -898,3 +899,85 @@ def _exercise_analysis_workspace():
             assert client.post("/v1/analysis/run", headers=headers, json=payload).json()["result"] is None
     finally:
         services.registry.dispose()
+
+
+def _exercise_publication_queue(central):
+    from datetime import timedelta
+    from threading import Event
+
+    from alembic import command
+
+    from backend.adapters.base import Delivery
+    from backend.core.output_switches import OutputSwitches, default_off_switches
+    from backend.modules.publishing.repository import PostgresFixtureLedger
+    from backend.modules.publishing.scheduler import ApprovedContent, content_hash, plan_job
+    from backend.tests.test_publishing import ARTICLE, DECISION, NOW, destination
+
+    registry = DatabaseRegistry()
+    engine = registry.engine("central")
+    repo = PostgresFixtureLedger(engine, clock=lambda: NOW)
+    approved = ApprovedContent("article", ARTICLE, DECISION, content_hash(ARTICLE), "domestic")
+    off = default_off_switches()
+    on = OutputSwitches.from_record({**off.record, "publishing": {**off.record["publishing"],
+        "enabled": True, "domestic_enabled": True}})
+
+    def plan(identity, switches=on):
+        return plan_job(approved, destination(identity, "telegram"), scheduled_at=NOW,
+                        deadline=NOW+timedelta(minutes=5), now=NOW, switches=switches)
+
+    job = plan("DST-PERSISTENT")
+    key = (job["idempotency_key"], job["destination_ids"][0])
+    started, release = Event(), Event()
+
+    def operation():
+        started.set()
+        assert release.wait(5)
+        return Delivery("success", "fixture-msg")
+
+    def unexpected():
+        pytest.fail("duplicate dispatch")
+
+    try:
+        repo.enqueue(job)
+        repo.enqueue(job)
+        with pytest.raises(ValueError, match="intent conflict"):
+            repo.enqueue({**job, "policy_decision_id": "changed"})
+        with pytest.raises(Exception):
+            repo.enqueue({**job, "object_type": "private_report"})
+        with pytest.raises(ValueError, match="not registered"):
+            repo.once((key[0], "other"), unexpected)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            future = pool.submit(repo.once, key, operation)
+            try:
+                assert started.wait(5)
+                second = pool.submit(repo.once, key, unexpected)
+                assert second.result(timeout=5).status == "unknown"
+            finally:
+                release.set()
+            assert future.result(timeout=5).status == "success"
+        registry.dispose()
+        restarted = PostgresFixtureLedger(registry.engine("central"), clock=lambda: NOW)
+        assert restarted.once(key, unexpected).message_id == "fixture-msg"
+        held = plan("DST-HELD", off)
+        restarted.enqueue(held)
+        assert restarted.once((held["idempotency_key"], "DST-HELD"), unexpected).status == "skipped"
+        expired = plan("DST-EXPIRED")
+        restarted.enqueue(expired)
+        late = PostgresFixtureLedger(registry.engine("central"), clock=lambda: NOW+timedelta(hours=1))
+        assert late.once((expired["idempotency_key"], "DST-EXPIRED"), unexpected).status == "skipped"
+        crash = plan("DST-CRASH")
+        restarted.enqueue(crash)
+
+        def crash_operation():
+            raise SystemExit(1)
+
+        crash_key = (crash["idempotency_key"], "DST-CRASH")
+        with pytest.raises(SystemExit):
+            restarted.once(crash_key, crash_operation)
+        assert restarted.once(crash_key, unexpected).status == "unknown"
+        assert restarted.get(crash["job_id"])["state"] == "in_progress"
+        assert restarted.get(job["job_id"])["state"] == "completed"
+        with pytest.raises(DBAPIError, match="publication history is not empty"):
+            command.downgrade(central, "009_image_assets")
+    finally:
+        registry.dispose()
