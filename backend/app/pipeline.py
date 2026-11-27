@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from backend.core.archive import PostgresNewsArchive
+from backend.core.orchestrator import ProcessingHandoff
 from backend.core.sources_service import SourceService
 from backend.modules.domestic.collector import collect
 from backend.modules.domestic.feed_client import (
@@ -56,6 +57,7 @@ class IngestPipeline:
     )
 
     news_archive: PostgresNewsArchive | None = None
+    handoff: ProcessingHandoff | None = None
 
     # --- ingest -----------------------------------------------------------
     def poll_source(
@@ -182,16 +184,23 @@ class IngestPipeline:
         cluster = self.clusterer.cluster(normalized)
         classified = classify(normalized, event_id=str(cluster["event_id"]))
         routing = route(classified)
-        return self.processed.save(
+        result = self.processed.save(
             news=normalized,
             cluster=cluster,
             classification=classified,
             extraction=extraction.as_dict(),
             routing=routing.as_dict(),
         )
+        self.flush_handoff()
+        return result
+
+    def flush_handoff(self) -> None:
+        if self.handoff is not None:
+            self.handoff.flush()
 
     def process_pending(self) -> int:
         """Process every stored raw record not processed yet."""
+        self.flush_handoff()
         processed = 0
         for raw in self.repository.list(limit=500):
             if self.processed.contains(str(raw["news_id"])):

@@ -27,10 +27,10 @@ from backend.core.audit import Auditor, InMemoryAuditSink, PostgresAuditSink
 from backend.core.auth import PostgresAccountStore
 from backend.core.db import DatabaseRegistry
 from backend.core.events import InMemoryEventBus
-from backend.core.jobs import JobQueue
+from backend.core.jobs import JobQueue, PostgresWorkflowJobs
 from backend.core.object_store import LocalObjectStore
-from backend.core.orchestrator import Orchestrator
-from backend.core.outbox import Outbox
+from backend.core.orchestrator import Orchestrator, ProcessingHandoff
+from backend.core.outbox import Outbox, PostgresOutbox
 from backend.core.output_switches import OutputSwitches, default_off_switches
 from backend.core.permissions import InMemoryGrantStore, PostgresGrantStore
 from backend.core.settings_service import (
@@ -93,6 +93,7 @@ class Services:
     chat_memory: PostgresChatMemory | None = None
     reports: ReportRepository | None = None
     publication_ledger: PostgresFixtureLedger | None = None
+    workflow_jobs: PostgresWorkflowJobs | None = None
     orchestrator: Orchestrator = field(init=False)
 
     def run_domestic_schedule(self, *, worker_id: str, limit: int = 10) -> list[PollResult]:
@@ -121,6 +122,8 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     storage = environ.get("ETEMAD_NEWS_STORAGE", "fixture")
     if storage not in {"fixture", "postgres"}:
         raise ValueError("invalid ETEMAD_NEWS_STORAGE")
+    handoff: ProcessingHandoff | None = None
+    workflow_jobs: PostgresWorkflowJobs | None = None
     raw_repository: RawNewsRepository | PostgresRawNewsRepository
     processing_repository: ProcessingRepository | PostgresProcessingRepository
     if storage == "postgres":
@@ -136,7 +139,10 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         if len(endpoints) != 2:
             raise ValueError("domestic and central databases must be separate")
         raw_repository = PostgresRawNewsRepository(registry)
-        processing_repository = PostgresProcessingRepository(registry)
+        engine = registry.engine("central")
+        handoff = ProcessingHandoff(PostgresOutbox(engine))
+        workflow_jobs = PostgresWorkflowJobs(engine)
+        processing_repository = PostgresProcessingRepository(registry, on_revision=handoff.record)
     else:
         raw_repository = RawNewsRepository()
         processing_repository = ProcessingRepository()
@@ -232,6 +238,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         schedules=schedules,
         transport=transport,
         news_archive=news_archive,
+        handoff=handoff,
     )
 
     foreign_workflow: ForeignWorkflow | None = None
@@ -276,6 +283,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         accounts=accounts,
         foreign_workflow=foreign_workflow,
         news_archive=news_archive,
+        workflow_jobs=workflow_jobs,
         publication_ledger=PostgresFixtureLedger(registry.engine("central")) if storage == "postgres" else None,
         reports=ReportRepository(registry.engine("central"), grant_store) if storage == "postgres" else None,
         chat_memory=PostgresChatMemory(registry.engine("central")) if storage == "postgres" else None,

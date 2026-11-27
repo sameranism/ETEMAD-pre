@@ -85,6 +85,7 @@ class ForeignWorkflow:
             if not self._inbox.process_one(self._consume):
                 break
             processed += 1
+        self._pipeline.flush_handoff()
         return {"schema_version": "1.0", "source_id": source_id, "mode": "fixture",
                 "collected": created, "delivered": delivered, "processed": processed,
                 "not_modified": response.not_modified}

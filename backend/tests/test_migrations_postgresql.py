@@ -68,7 +68,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 24
+            assert len(central_tables) == 26
+            assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
             assert {("insights", "public_report_drafts"), ("insights", "executive_reports")} <= central_tables
             assert ("control", "ai_cost_reservations") in central_tables
             assert ("insights", "chat_memory") in central_tables
@@ -80,13 +81,13 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert ("identity", "login_throttle") in central_tables
             assert ("processing", "artifact_history") in central_tables
             assert {schema for schema, _ in central_tables} == {
-                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights",
+                "audit", "control", "identity", "processing", "sources", "editorial", "archive", "publish", "insights", "orchestration",
             }
             assert tables("domestic") == tables("foreign") == set()
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
                 row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
+                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
             }
             command.downgrade(central, "base")
             assert tables("central") == set()
@@ -135,12 +136,131 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             _exercise_analysis_workspace(central)
             _exercise_publication_queue(central)
             _exercise_ai_cost_ledger()
+            _exercise_workflow_handoff(central)
             assert tables("foreign") == foreign_tables
             assert tables("central") == central_tables
             assert tables("domestic") == domestic_tables
         finally:
             for database in reversed(created):
                 control.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(database)))
+
+
+def _clear_workflow_test_rows(registry):
+    """Only for this disposable test DB: isolate older downgrade guard checks."""
+    with registry.engine("central").begin() as conn:
+        conn.execute(text("DELETE FROM orchestration.jobs"))
+        conn.execute(text("DELETE FROM orchestration.outbox"))
+
+
+def _exercise_workflow_handoff(central):
+    from alembic import command
+
+    from backend.app.dependencies import build_services
+    from backend.core.events import ExecutivePrivateEventRoutingError, make_event
+    from backend.core.jobs import InvalidTransition, PostgresWorkflowJobs
+    from backend.core.orchestrator import ProcessingHandoff
+    from backend.core.outbox import PostgresOutbox
+    from backend.modules.processing.router import route
+
+    services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+        "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+        "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+    registry = services.registry
+    engine = registry.engine("central")
+    second = DatabaseRegistry()
+    outbox = PostgresOutbox(engine)
+    handoff = ProcessingHandoff(outbox)
+    repo = PostgresProcessingRepository(registry, on_revision=handoff.record)
+    assert services.workflow_jobs is not None
+    raw = {"schema_version": "1.0", "news_id": "NEWS-WORKFLOW-TEST",
+        "stream": "domestic", "source_id": "SRC-WORKFLOW-TEST",
+        "original_url": "https://example.invalid/workflow/1", "original_title": "Fixture",
+        "original_text": "Synthetic workflow content", "language": "fa",
+        "subject_countries": [], "collected_at": "2026-11-26T19:00:00Z",
+        "content_scope": "summary", "reuse_permission": "unverified"}
+
+    def arguments(record):
+        normalized = normalize(record)
+        cluster = Clusterer().cluster(normalized)
+        classified = classify(normalized, event_id=cluster["event_id"])
+        return dict(news=normalized, cluster=cluster, classification=classified,
+                    routing=route(classified).as_dict())
+
+    try:
+        _clear_workflow_test_rows(registry)
+        args = arguments(raw)
+
+        def rollback(conn, classified, routing, revision, digest):
+            handoff.record(conn, classified, routing, revision, digest)
+            raise RuntimeError("fixture producer rollback")
+
+        failing = PostgresProcessingRepository(registry, on_revision=rollback)
+        with pytest.raises(RuntimeError, match="fixture producer rollback"):
+            failing.save(**args)
+        assert repo.get(raw["news_id"]) is None
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM orchestration.outbox")).scalar_one() == 0
+        # Simulate the process stopping between producer commit and queue handoff.
+        repo.save(**args)
+        repo.save(**args)
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT count(*) FROM orchestration.outbox WHERE published_at IS NULL")).scalar_one() == 1
+        assert services.workflow_jobs.counts() == {}
+        restarted_outbox = PostgresOutbox(second.engine("central"))
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert sum(pool.map(lambda _: restarted_outbox.dispatch_to_jobs(), range(2))) == 1
+        assert restarted_outbox.dispatch_to_jobs() == 0
+        queue = PostgresWorkflowJobs(second.engine("central"))
+        assert queue.counts() == {"queued": 1}
+        assert queue.claim(project="P12", stream="foreign") is None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claims = list(pool.map(lambda _: queue.claim(project="P13", stream="domestic"), range(2)))
+        assert sum(claim is not None for claim in claims) == 1
+        claim = next(claim for claim in claims if claim is not None)
+        assert claim["payload_ref"] == "processing/history/NEWS-WORKFLOW-TEST/1"
+        assert repo.get_revision(raw["news_id"], 1).news == args["news"]
+        with pytest.raises(InvalidTransition, match="stale"):
+            queue.finish(job_id=claim["job_id"], lease_token="wrong", success=True)
+        with second.engine("central").begin() as conn:
+            conn.execute(text("UPDATE orchestration.jobs SET lease_until=now()-interval '1 second' WHERE job_id=:id"),
+                         {"id": claim["job_id"]})
+        assert queue.claim(project="P13", stream="domestic") is None
+        assert queue.get(claim["job_id"])["last_error"] == "lease_expired"
+        with pytest.raises(InvalidTransition):
+            queue.retry(job_id=claim["job_id"], revalidate=lambda _: False)
+        queue.retry(job_id=claim["job_id"], revalidate=lambda _: True)
+        queue.hold(job_id=claim["job_id"])
+        assert queue.claim(project="P13", stream="domestic") is None
+        queue.retry(job_id=claim["job_id"], revalidate=lambda _: True)
+        retry = queue.claim(project="P13", stream="domestic")
+        assert retry["attempts"] == 2 and retry["lease_token"] != claim["lease_token"]
+        queue.finish(job_id=retry["job_id"], lease_token=retry["lease_token"], success=False)
+        queue.retry(job_id=retry["job_id"], revalidate=lambda _: True)
+        last = queue.claim(project="P13", stream="domestic")
+        queue.finish(job_id=last["job_id"], lease_token=last["lease_token"], success=False)
+        with pytest.raises(InvalidTransition):
+            queue.retry(job_id=last["job_id"], revalidate=lambda _: True)
+        assert queue.get(last["job_id"])["attempts"] == 3
+        with engine.begin() as conn:
+            private = make_event(event_type="news.classified", producer_project="P09",
+                object_id="PRIVATE-TEST", correlation_id=str(uuid4()), payload_ref="private/fixture",
+                classification="executive_private")
+            with pytest.raises(ExecutivePrivateEventRoutingError):
+                outbox.append_in_transaction(conn, private, stream="domestic", project="P13")
+        # Actual application pipeline uses the same handoff without test injection.
+        foreign = {**raw, "news_id": "NEWS-WORKFLOW-FOREIGN", "stream": "foreign",
+                   "original_url": "https://example.invalid/workflow/2", "language": "en"}
+        services.pipeline.process(foreign)
+        assert queue.counts() == {"failed": 1, "queued": 1}
+        fjob = queue.claim(project="P12", stream="foreign")
+        assert fjob is not None and fjob["payload_ref"] == "processing/history/NEWS-WORKFLOW-FOREIGN/1"
+        queue.finish(job_id=fjob["job_id"], lease_token=fjob["lease_token"], success=True)
+        assert queue.counts() == {"failed": 1, "done": 1}
+        with pytest.raises(DBAPIError, match="workflow history is not empty"):
+            command.downgrade(central, "013_daily_reports")
+    finally:
+        services.registry.dispose()
+        second.dispose()
 
 
 def _exercise_durable_settings():
@@ -558,6 +678,7 @@ def _exercise_foreign_inbox(central):
         with engine.connect() as conn:
             assert conn.execute(text("SELECT count(*) FROM processing.foreign_inbox")).scalar_one() == 1
             assert conn.execute(text("SELECT count(*) FROM processing.foreign_inbox WHERE processed_at IS NOT NULL")).scalar_one() == 1
+        _clear_workflow_test_rows(services.registry)
         with pytest.raises(DBAPIError, match="foreign inbox is not empty"):
             command.downgrade(central, "005_source_registry")
     finally:
@@ -757,6 +878,7 @@ def _exercise_editorial_workspace(central):
         reopened = EditorialRepository(engine)
         assert reopened.get(news_id)["version"] == 3
         assert reopened.get(news_id, 1) == saved
+        _clear_workflow_test_rows(services.registry)
         with pytest.raises(DBAPIError, match="editorial history is not empty"):
             command.downgrade(central, "006_foreign_inbox")
     finally:
@@ -839,6 +961,7 @@ def _exercise_archive_workspace(central):
             assert client.get(original_path, headers=headers).status_code == 422
             with pytest.raises(ArchiveIntegrityError, match="checksum"):
                 reopened.capture(raw)
+        _clear_workflow_test_rows(services.registry)
         with pytest.raises(DBAPIError, match="news archive is not empty"):
             command.downgrade(central, "007_editorial_revisions")
     finally:
@@ -903,6 +1026,7 @@ def _exercise_image_workspace(central):
         engine = services.registry.engine("central")
         engine.dispose()
         assert services.images.list(news_id, 3) == [saved]
+        _clear_workflow_test_rows(services.registry)
         with pytest.raises(DBAPIError, match="image history is not empty"):
             command.downgrade(central, "008_news_archive")
     finally:
@@ -1053,6 +1177,7 @@ def _exercise_analysis_workspace(central):
             services.grants.revoke(Grant(eic.subject_id, eic.role, "private_report", "slot-5", "read"))
             assert client.get(daily + "/5", headers=eic_headers).status_code == 404
             from alembic import command
+            _clear_workflow_test_rows(services.registry)
             with pytest.raises(DBAPIError, match="report history is not empty"):
                 command.downgrade(central, "012_ai_cost_ledger")
             # Remove only this disposable test's report fixtures so the
@@ -1198,6 +1323,7 @@ def _exercise_publication_queue(central):
         assert restarted.once(crash_key, unexpected).status == "unknown"
         assert restarted.get(crash["job_id"])["state"] == "in_progress"
         assert restarted.get(job["job_id"])["state"] == "completed"
+        _clear_workflow_test_rows(registry)
         with pytest.raises(DBAPIError, match="publication history is not empty"):
             command.downgrade(central, "009_image_assets")
     finally:
