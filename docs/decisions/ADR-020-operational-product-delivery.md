@@ -28,6 +28,8 @@ this decision. Seven existing studio tasks stay deferred until the owner
 explicitly reopens them; final acceptance must disclose that scope exclusion.
 Do not declare the original unrestricted 29-project scope delivered.
 
+For executable project/PR planning, use [the 29-project roadmap](../ops/PROJECT_PR_ROADMAP.md) and [the exact task-to-PR-unit assignment](../../manifests/project_pr_tasks.csv). Unit IDs are planning scopes, not real PR numbers; retain actual dependencies and record actual PR/commit evidence in Issue #78.
+
 ## Product roadmap / نقشه راه
 
 The rows below are workstreams, NOT serial gates. Choose eligible slices by
