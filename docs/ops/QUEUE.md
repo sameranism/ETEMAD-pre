@@ -1,4 +1,37 @@
-# QUEUE — صف کار ETEMAD (به ترتیب وابستگی)
+# QUEUE — صف کار ETEMAD (تحویل محصول عملیاتی)
+
+## ACTIVE — ADR-020 (effective on protected merge)
+
+The [operational product delivery decision](../decisions/ADR-020-operational-product-delivery.md)
+and [complete task execution assignment](../../manifests/product_delivery_tasks.csv)
+are the active roadmap, not the historical serial queue below. All 223 task IDs,
+original targets, prompts, references and acceptance criteria remain traceable;
+216 active, 7 explicitly deferred studio tasks. D01–D10 are dependency-aware
+parallel workstreams, not ten mandatory serial gates. Group related owned tasks
+into usable capability deliveries with one writer per capability, mandatory
+CI and risk-relevant checks; do not repeat deployments or documentation-only PRs.
+Tests are evidence and staging is intermediate; LIVE_VERIFIED and ACCEPTED
+require actual authorized newsroom workflows. See ADR-020 for the acceptance
+scenario and dependencies of every workstream.
+
+Current next slice: D05 durable translation/draft revision repository,
+additive editorial migration, authorized source-linked API and usable P27
+workspace; #100 is merged, not deployed. Verify existing B05 preview path once.
+D04 durable processing, D06 archive/retrieval, D07 analysis/reports/chat and
+D08 publication capability can progress independently where actual dependencies
+are satisfied; complete D02/D03 remaining source/schedule and live-readiness
+requirements. Prioritize user-visible outcomes and unblock dependencies rather
+than a fixed package sequence. Record actual progress in Issue #78. No
+production activation before applicable authorization and release controls.
+Report only after five different B packages have verified operational dashboard
+paths, or if owner action is genuinely necessary; this is not final acceptance.
+
+## Historical queue and project prompts (retained for evidence)
+
+The entries below are historical scheduling/checkpoints and original project
+prompt references. Apply ADR-020 where their serial or WIP rules conflict;
+retain actual dependencies, ownership, acceptance and safety requirements.
+
 
 ## Active execution overlay — ADR-019 product-first (effective on protected merge)
 

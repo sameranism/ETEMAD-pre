@@ -1,5 +1,20 @@
 # ETEMAD execution state
 
+## Current product-delivery baseline — 2026-11-27
+
+- Active private runtime verified at `b8e5ebdfd0e4af0748a0440e3332e8fd9bcee1e5`;
+  #95/#96/#98/#99 deployed, no schema change, backup catalogs verified, health/UI
+  200 and anonymous editorial/news 401. Full restore and authorized browser
+  preview not yet verified. See [Issue #78](https://github.com/sameranism/ETEMAD-pre/issues/78#issuecomment-7205872231).
+- PR #100 merged at `92be0c55b611740d977b6af97dcda7d4083d670c`, exact-head
+  required CI successful. Translation/editorial draft modules have fixture
+  verification, no durable revision store or authorized API/UI path yet.
+  Do not claim production delivery or five-package milestone.
+- ADR-020 and its task execution assignment take effect on protected merge.
+  Current next delivery is D05 revisions/persistence/API/UI, with independent
+  workstreams eligible as stated in the roadmap. Older checkpoints below are
+  retained evidence, not current runtime or mandatory serial scheduling.
+
 ## Latest verified R04 dashboard-integration checkpoint — 2026-11-27
 
 - [PR #98](https://github.com/sameranism/ETEMAD-pre/pull/98) connected the
