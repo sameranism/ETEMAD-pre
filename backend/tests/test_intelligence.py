@@ -6,7 +6,7 @@ import pytest
 from backend.modules.intelligence.analysis import analyze
 from backend.modules.intelligence.chat import answer_question
 from backend.modules.intelligence.evidence import Evidence, Period
-from backend.modules.intelligence.retrieval import retrieve
+from backend.modules.intelligence.retrieval import excerpt, retrieve, terms
 
 PERIOD = Period(datetime(2026, 11, 26, tzinfo=timezone.utc), datetime(2026, 11, 28, tzinfo=timezone.utc))
 RAW = {"schema_version": "1.0", "news_id": "NEWS-INTELLIGENCE", "stream": "foreign", "source_id": "SRC-ONE",
@@ -53,3 +53,23 @@ def test_restricted_rights_and_absent_evidence():
 def test_period_requires_explicit_timezone():
     with pytest.raises(ValueError):
         Period(datetime(2026, 11, 26), datetime(2026, 11, 27))
+
+
+def test_persian_arabic_variants_retrieve_exact_original():
+    raw = {**RAW, "original_title": "بودجه ۱۴۰۵", "original_text": "بانک مَلّی درباره بودجه ۱۴۰۵ گزارش داد."}
+    bundle = retrieve("بانك ملي ١٤٠٥", PERIOD, candidates=[raw], authorized=lambda _: "summary",
+                      load=lambda _, scope: Evidence.from_raw(raw, "raw-" + "a"*64, "b"*64, allowed_scope=scope))
+    assert terms("بانك ملي ١٤٠٥") == ("بانک", "ملی", "1405")
+    assert len(bundle.evidence) == 1
+    assert excerpt(bundle.evidence[0], "ملي") == raw["original_text"]
+    assert answer_question("ملي", bundle)["citations"][0]["quote_span"] == raw["original_text"]
+
+
+def test_whole_word_preferred_over_substring():
+    first = {**RAW, "original_title": "Atlas evidence", "original_text": "Atlas report"}
+    second = {**RAW, "news_id": "NEWS-ATLAS-TWO", "original_title": "Atlases", "original_text": "Atlases"}
+    bundle = retrieve("Atlas", PERIOD, candidates=[second, first], authorized=lambda _: "summary",
+                      load=lambda raw, scope: Evidence.from_raw(
+                          raw, "raw-" + ("a" if raw is first else "c")*64, "b"*64, allowed_scope=scope))
+    assert [item.news_id for item in bundle.evidence] == [first["news_id"], second["news_id"]]
+    assert excerpt(bundle.evidence[1], "Atlas") == "Atlases"

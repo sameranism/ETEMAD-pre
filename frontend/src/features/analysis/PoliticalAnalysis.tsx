@@ -38,8 +38,23 @@ export function parseAnalysis(value: unknown, mode: "run" | "chat"): Envelope {
   return { result: result as Result, evidence: value.evidence as EvidenceRef[] };
 }
 
+// Only user-entered context is carried forward, never cached source text or
+// evidence. The existing API repeats all current permission checks.
+export function composeChatQuery(question: string, context: string | null): string {
+  const query = [question.trim(), context?.trim()].filter(Boolean).join("\n");
+  if (!question.trim() || Array.from(query).length > 500) throw new Error("context bounds");
+  return query;
+}
+
 export default function PoliticalAnalysis({ token }: { token: string }) {
+  // A new authentication session discards the previous conversation state.
+  return <AnalysisSession key={token} token={token} />;
+}
+
+function AnalysisSession({ token }: { token: string }) {
   const [query, setQuery] = useState("");
+  const [context, setContext] = useState<string | null>(null);
+  const [followup, setFollowup] = useState(false);
   const [days, setDays] = useState("7");
   const [stream, setStream] = useState("");
   const [mode, setMode] = useState<"run" | "chat">("run");
@@ -51,6 +66,9 @@ export default function PoliticalAnalysis({ token }: { token: string }) {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (busy || !query.trim()) return;
+    let requestQuery: string;
+    try { requestQuery = composeChatQuery(query, mode === "chat" && followup ? context : null); }
+    catch { setMessage("مجموع سؤال و موضوع پیشین باید حداکثر ۵۰۰ نویسه باشد."); return; }
     const controller = new AbortController(); active.current = controller;
     setBusy(true); setMessage(""); setResult(null);
     const end = new Date();
@@ -59,12 +77,18 @@ export default function PoliticalAnalysis({ token }: { token: string }) {
       const response = await fetch("/v1/analysis/" + mode, { method: "POST", signal: controller.signal,
         credentials: "same-origin", cache: "no-store", redirect: "error",
         headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
-        body: JSON.stringify({ query: query.trim(), period_start: start.toISOString(),
+        body: JSON.stringify({ query: requestQuery, period_start: start.toISOString(),
           period_end: end.toISOString(), stream: stream || null, limit: 12 }) });
       if (response.status === 401 || response.status === 403) throw new Error("denied");
       if (!response.ok) throw new Error("unavailable");
       const data = parseAnalysis(await response.json(), mode);
-      if (!controller.signal.aborted) setResult(data);
+      if (!controller.signal.aborted) {
+        setResult(data);
+        if (mode === "chat" && data.evidence.length > 0) {
+          if (!followup || !context) setContext(query.trim());
+          setQuery("");
+        }
+      }
     } catch (error) {
       if (!controller.signal.aborted) setMessage(error instanceof Error && error.message === "denied"
         ? "مجوز تحلیل یا دسترسی به شواهد آرشیو وجود ندارد." : "بازیابی شواهد ناموفق بود.");
@@ -77,11 +101,25 @@ export default function PoliticalAnalysis({ token }: { token: string }) {
       <fieldset disabled={busy} className="grid gap-2">
         <label>نوع درخواست <select value={mode} onChange={event => {
           setMode(event.target.value === "chat" ? "chat" : "run"); setResult(null);
+          setContext(null); setFollowup(false);
         }}><option value="run">تحلیل روایی و خط زمانی</option><option value="chat">پرسش از آرشیو</option></select></label>
         <label>موضوع یا پرسش <textarea required maxLength={500} value={query} onChange={event => setQuery(event.target.value)} /></label>
-        <label>بازه <select value={days} onChange={event => setDays(event.target.value)}>
+        {mode === "chat" && context && <div className="grid gap-1">
+          <label><input type="checkbox" checked={followup} onChange={event => setFollowup(event.target.checked)} />
+            ادامه موضوع قبلی در جست‌وجو</label>
+          <p dir="auto">موضوع قبلی: {context}</p>
+          <button type="button" onClick={() => { setContext(null); setFollowup(false); setResult(null); }}>
+            پاک کردن زمینه گفت‌وگو
+          </button>
+          <p>زمینه فقط در این نشست مرورگر باقی می‌ماند؛ منابع دوباره با مجوز جاری بازیابی می‌شوند.</p>
+        </div>}
+        <label>بازه <select value={days} onChange={event => {
+          setDays(event.target.value); setContext(null); setFollowup(false); setResult(null);
+        }}>
           <option value="1">۲۴ ساعت اخیر</option><option value="7">۷ روز اخیر</option><option value="30">۳۰ روز اخیر</option></select></label>
-        <label>جریان <select value={stream} onChange={event => setStream(event.target.value)}>
+        <label>جریان <select value={stream} onChange={event => {
+          setStream(event.target.value); setContext(null); setFollowup(false); setResult(null);
+        }}>
           <option value="">همه مجاز</option><option value="domestic">ایران</option><option value="foreign">جهان</option></select></label>
         <button type="submit" disabled={!query.trim()}>{mode === "run" ? "تحلیل اسناد" : "بازیابی پاسخ مستند"}</button>
       </fieldset>

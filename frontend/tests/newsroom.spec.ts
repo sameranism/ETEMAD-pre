@@ -1,4 +1,4 @@
-import PoliticalAnalysis, { parseAnalysis } from "../src/features/analysis/PoliticalAnalysis";
+import PoliticalAnalysis, { composeChatQuery, parseAnalysis } from "../src/features/analysis/PoliticalAnalysis";
 import { parseImages } from "../src/features/images/ImageWorkspace";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -289,6 +289,12 @@ describe("internal image renditions", () => {
 });
 
 describe("archive-backed intelligence", () => {
+  it("uses explicit bounded previous-topic context without cached evidence", () => {
+    expect(composeChatQuery("چه شد؟", "بودجه ۱۴۰۵")).toBe("چه شد؟\nبودجه ۱۴۰۵");
+    expect(composeChatQuery("موضوع تازه", null)).toBe("موضوع تازه");
+    expect(() => composeChatQuery(" ", "موضوع قبلی")).toThrow();
+    expect(() => composeChatQuery("الف".repeat(500), "ب")).toThrow();
+  });
   const ref = "raw-" + "a".repeat(64);
   const evidence = [{ source_ref: ref, news_id: "NEWS-ONE", title: "شاهد", original_url: "https://example.invalid/one",
     collected_at: "2026-11-27T00:00:00Z", stream: "foreign", text_redacted: false }];

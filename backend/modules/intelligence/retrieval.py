@@ -8,13 +8,18 @@ from typing import Any, Callable, Mapping, Sequence
 from backend.modules.intelligence.evidence import Evidence, EvidenceBundle, Period
 
 _MAX_CANDIDATES = 100
-_TERMS = re.compile(r"[^\W_]+", re.UNICODE)
+# Include Arabic combining marks in original word spans so excerpts can
+# preserve the exact source even when the query omits vowel marks.
+_TERMS = re.compile(r"(?:[^\W_]|[\u064b-\u065f\u0670\u06d6-\u06ed])+", re.UNICODE)
+_ARABIC_MARKS = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed\u0640]")
+_VARIANTS = str.maketrans("يىك٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "ییک01234567890123456789")
 _STOP = frozenset({"از", "به", "در", "و", "که", "را", "این", "چه", "است", "برای", "با",
                    "the", "a", "an", "is", "of", "in", "to", "and", "what", "about"})
 
 
 def normalized(text: str) -> str:
-    return unicodedata.normalize("NFKC", text).casefold().replace("ي", "ی").replace("ك", "ک")
+    value = unicodedata.normalize("NFKC", text).casefold().translate(_VARIANTS)
+    return _ARABIC_MARKS.sub("", value)
 
 
 def terms(query: str) -> tuple[str, ...]:
@@ -48,7 +53,12 @@ def retrieve(
         seen.add(evidence.artifact_id)
         title = normalized(evidence.title)
         body = normalized((evidence.text or "")[:60_000])
-        score = sum(3 * (token in title) + (token in body) for token in tokens)
+        title_words = set(_TERMS.findall(title))
+        body_words = set(_TERMS.findall(body))
+        # Keep substring recall for inflected words; rank whole-word evidence
+        # first. Never modify the source used for citations.
+        score = sum(6 * (token in title_words) + 2 * (token in body_words)
+                    + 3 * (token in title) + (token in body) for token in tokens)
         if score > 0:
             ranked.append((score, evidence))
     ranked.sort(key=lambda pair: (-pair[0], -pair[1].collected_at.timestamp(), pair[1].artifact_id))
@@ -62,6 +72,9 @@ def excerpt(evidence: Evidence, query: str, *, maximum: int = 240) -> str | None
     # Return an exact contiguous excerpt, not a rewritten quotation.
     words = terms(query)
     matches = [m.start() for m in _TERMS.finditer(text) if normalized(m.group()) in words]
+    if not matches:
+        matches = [m.start() for m in _TERMS.finditer(text)
+                   if any(word in normalized(m.group()) for word in words)]
     if not matches:
         return None
     start = max(0, matches[0] - 60)
