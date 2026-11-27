@@ -157,7 +157,12 @@ def build_router(
             previous = saved["source_snapshot"]
             if previous["source_id"] != raw["source_id"] or previous["content_scope"] != raw["content_scope"]:
                 raise APIError(ErrorCode.FORBIDDEN)
-        latest = services.editorial.get(news_id)
+        # For the editable latest view, the concurrency token must come from
+        # the exact revision returned to the editor.  A second read here can
+        # race with another writer and would let an unseen revision be
+        # overwritten. Historical views are read-only, so they may report the
+        # current head separately.
+        latest = saved if version is None else services.editorial.get(news_id)
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "source": raw, "source_hash": digest(canonical(raw)),
                 "desks": desks, "latest_version": latest["version"] if latest else 0,
