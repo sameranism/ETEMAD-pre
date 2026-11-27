@@ -1,0 +1,41 @@
+"""P23/S06-002 durable directory of unverified publication destinations."""
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy.dialects.postgresql import JSONB
+
+revision = "014_destination_directory"
+down_revision = "013_daily_reports"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "destinations",
+        sa.Column("destination_id", sa.String(64), primary_key=True),
+        sa.Column("platform", sa.String(32), nullable=False),
+        sa.Column("channel_ref", sa.String(128), nullable=False),
+        sa.Column("record", JSONB(), nullable=False),
+        sa.Column("created_by", sa.String(64), nullable=False),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.UniqueConstraint("platform", "channel_ref", name="uq_publish_destination_channel"),
+        sa.CheckConstraint("platform IN ('telegram','bale','eitaa','rubika')", name="ck_destination_platform"),
+        sa.CheckConstraint(
+            "(record->>'destination_id'=destination_id AND record->>'platform'=platform "
+            "AND record->>'address'=channel_ref AND record->'enabled'='false'::jsonb "
+            "AND record->>'connection_state'='unverified') IS TRUE",
+            name="ck_destination_unverified",
+        ),
+        schema="publish",
+    )
+
+
+def downgrade() -> None:
+    op.execute("""
+        DO $$ BEGIN
+          LOCK TABLE publish.destinations IN ACCESS EXCLUSIVE MODE;
+          IF EXISTS (SELECT 1 FROM publish.destinations)
+          THEN RAISE EXCEPTION 'destination directory is not empty'; END IF;
+        END $$;
+    """)
+    op.drop_table("destinations", schema="publish")
