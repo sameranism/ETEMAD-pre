@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import App, { parseNewsFeed } from "../src/app/App";
 import Login from "../src/features/auth/Login";
 import ArticleEditor, { parseEditorialPreview } from "../src/features/editor/ArticleEditor";
+import DraftWorkspace, { parseWorkspace } from "../src/features/editor/DraftWorkspace";
 import NewsDesk from "../src/features/newsroom/NewsDesk";
 import SourcesManager, { ForeignMonitor, parseForeignStatus, parseSources } from "../src/features/sources/SourcesManager";
 import Settings, { parseDomesticSchedule, scheduleError } from "../src/features/settings/Settings";
@@ -219,5 +220,35 @@ describe("editorial preview", () => {
     expect(html).toContain("پیش‌نمایش بدون انتشار");
     expect(html).not.toContain("fixture-not-a-real-token");
     expect(html).not.toContain("عبارت مصوب");
+  });
+});
+
+describe("source-linked durable drafts", () => {
+  const snapshot = { news_id: item.news_id, original_title: "Fixture", original_text: "Immutable source",
+    stream: "foreign", language: "en" };
+  const response = { schema_version: "1.0", mode: "manual", source: snapshot,
+    source_hash: "a".repeat(64), desks: ["international"], latest_version: 0,
+    saved: null, history: [] };
+  it("accepts only a source-linked, versioned workspace", () => {
+    expect(parseWorkspace(response, item.news_id).source.original_text).toBe("Immutable source");
+    expect(() => parseWorkspace(response, "NEWS-OTHER")).toThrow();
+    expect(() => parseWorkspace({ ...response, source_hash: "bad" }, item.news_id)).toThrow();
+    const saved = { version: 1, source_hash: response.source_hash, source_snapshot: snapshot,
+      article: { news_id: item.news_id, desk: "international", status: "draft",
+        title: "title", lead: "lead", body: "body", short_summary: "summary" },
+      translation: null, quality: { passed: true, reason_codes: [] },
+      policy: { decision: "human_review", reason_codes: ["SOURCE_RIGHTS_UNKNOWN"] } };
+    expect(parseWorkspace({ ...response, latest_version: 1, saved }, item.news_id).saved?.version).toBe(1);
+    expect(() => parseWorkspace({ ...response, latest_version: 1,
+      saved: { ...saved, policy: { decision: "auto_allowed", reason_codes: [] } } }, item.news_id)).toThrow();
+  });
+  it("renders real feed selection without exposing the token", () => {
+    const html = renderToStaticMarkup(createElement(DraftWorkspace, {
+      token: "fixture-not-a-real-token", items: parseNewsFeed(envelope([{ ...item, desks: [...item.desks] }])),
+    }));
+    expect(html).toContain("پیش‌نویس و تاریخچه خبر");
+    expect(html).toContain(item.title);
+    expect(html).not.toContain("fixture-not-a-real-token");
+    expect(html).not.toContain("ذخیره نسخه جدید");
   });
 });
