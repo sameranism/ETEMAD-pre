@@ -59,6 +59,7 @@ from backend.modules.domestic.scheduler import (
 from backend.modules.editorial.generation import EditorialGenerator
 from backend.modules.editorial.image_repository import ImageRepository
 from backend.modules.editorial.repository import EditorialRepository
+from backend.modules.intelligence.analysis_store import PostgresAnalysisHistory
 from backend.modules.intelligence.chat_memory import PostgresChatMemory
 from backend.modules.intelligence.metrics import MetricSnapshotRepository
 from backend.modules.intelligence.report_repository import ReportRepository
@@ -96,6 +97,7 @@ class Services:
     images: ImageRepository | None = None
     news_archive: PostgresNewsArchive | None = None
     chat_memory: PostgresChatMemory | None = None
+    analyses: PostgresAnalysisHistory | None = None
     metrics: MetricSnapshotRepository | None = None
     reports: ReportRepository | None = None
     publication_ledger: PostgresFixtureLedger | None = None
@@ -306,6 +308,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         reports=reports,
         metrics=MetricSnapshotRepository(registry.engine("central")) if storage == "postgres" else None,
         chat_memory=PostgresChatMemory(registry.engine("central")) if storage == "postgres" else None,
+        analyses=PostgresAnalysisHistory(registry.engine("central")) if storage == "postgres" else None,
         images=ImageRepository(registry.engine("central"), objects) if storage == "postgres" else None,
         editorial_generator=generator,
         editorial=EditorialRepository(registry.engine("central")) if storage == "postgres" else None,
