@@ -1070,6 +1070,53 @@ def _exercise_publication_queue(central):
         restarted.enqueue(expired)
         late = PostgresFixtureLedger(registry.engine("central"), clock=lambda: NOW+timedelta(hours=1))
         assert late.once((expired["idempotency_key"], "DST-EXPIRED"), unexpected).status == "skipped"
+        manual = plan("DST-MANUAL-HOLD")
+        restarted.enqueue(manual)
+        assert restarted.hold(manual["job_id"]) == "held"
+        assert restarted.hold(manual["job_id"]) == "held"
+        assert restarted.once((manual["idempotency_key"], "DST-MANUAL-HOLD"), unexpected).status == "skipped"
+        assert restarted.hold("unknown") is None
+        with pytest.raises(ValueError, match="already progressed"):
+            restarted.hold(job["job_id"])
+        overview = restarted.overview(limit=100)
+        by_id = {entry["job_id"]: entry for entry in overview["items"]}
+        assert by_id[manual["job_id"]]["state"] == "held"
+        assert by_id[job["job_id"]]["attempt"]["message_id"] == "fixture-msg"
+        assert "idempotency_key" not in by_id[job["job_id"]]
+
+        from fastapi.testclient import TestClient
+
+        from backend.app.dependencies import build_services
+        from backend.app.main import create_app
+        from backend.core.auth import Principal, issue_session
+        from backend.core.permissions import Grant
+
+        services = build_services(environ={**os.environ, "ETEMAD_NEWS_STORAGE": "postgres",
+            "ETEMAD_ENV": "staging", "ETEMAD_FEED_MODE": "fixture",
+            "ETEMAD_SOURCE_STORAGE": "postgres", "ETEMAD_SESSION_KEY": "fixture-only-session-key"})
+        principal = Principal("fixture-publication-operator", "staff")
+        headers = {"Authorization": "Bearer " + issue_session(principal, services.session_key)}
+        pending = plan("DST-API-HOLD")
+        restarted.enqueue(pending)
+        path = "/v1/publishing/queue"
+        hold_path = path + "/" + pending["job_id"] + "/hold"
+        try:
+            with TestClient(create_app(services=services)) as client:
+                assert client.get(path).status_code == 401
+                assert client.get(path, headers=headers).status_code == 403
+                services.grants.grant(Grant(principal.subject_id, principal.role,
+                                            "publication_workspace", "default", "read"))
+                data = client.get(path, headers=headers)
+                assert data.status_code == 200 and data.headers["Cache-Control"] == "no-store"
+                assert data.json()["live_dispatch_available"] is False
+                assert data.json()["publishing_enabled"] is False
+                assert client.post(hold_path, headers=headers).status_code == 403
+                services.grants.grant(Grant(principal.subject_id, principal.role,
+                                            "publication_workspace", pending["job_id"], "hold"))
+                assert client.post(hold_path, headers=headers).json()["state"] == "held"
+                assert restarted.get(pending["job_id"])["state"] == "held"
+        finally:
+            services.registry.dispose()
         crash = plan("DST-CRASH")
         restarted.enqueue(crash)
 

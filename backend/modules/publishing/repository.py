@@ -99,3 +99,56 @@ class PostgresFixtureLedger:
                 UPDATE publish.jobs SET state='completed' WHERE idempotency_key=:key
             """), params)
         return outcome
+
+
+    def overview(self, *, limit: int = 100) -> dict[str, Any]:
+        """Recorded fixture queue history, not verified live delivery metrics."""
+        if not 1 <= limit <= 100:
+            raise ValueError("invalid queue limit")
+        with self._engine.connect() as conn:
+            rows = conn.execute(text("""
+                SELECT j.record,j.state,a.status AS attempt_status,a.message_id,
+                       a.error_code,a.started_at,a.ended_at
+                FROM publish.jobs j LEFT JOIN publish.attempts a
+                  ON a.idempotency_key=j.idempotency_key AND a.destination_id=j.destination_id
+                ORDER BY j.scheduled_at DESC,j.job_id LIMIT :limit
+            """), {"limit": limit+1}).mappings().all()
+        items = []
+        for row in rows[:limit]:
+            job = {**row["record"], "state": row["state"]}
+            validate_payload("publication_job", job)
+            items.append({
+                "job_id": job["job_id"], "object_id": job["object_id"],
+                "object_type": job["object_type"], "stream": job["stream"],
+                "destination_id": job["destination_ids"][0],
+                "state": job["state"], "scheduled_at": job["scheduled_at"],
+                "expires_at": job["expires_at"],
+                "attempt": None if row["attempt_status"] is None else {
+                    "status": row["attempt_status"], "message_id": row["message_id"],
+                    "error_code": row["error_code"],
+                    "started_at": row["started_at"].isoformat(),
+                    "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+                },
+                "can_hold": job["state"] == "scheduled" and row["attempt_status"] is None,
+            })
+        return {"items": items, "bounded": len(rows) > limit}
+
+    def hold(self, job_id: str) -> str | None:
+        """Hold an unattempted job only; never interrupt or replay a delivery."""
+        with self._engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT idempotency_key,state FROM publish.jobs
+                WHERE job_id=:job FOR UPDATE
+            """), {"job": job_id}).mappings().one_or_none()
+            if row is None:
+                return None
+            if row["state"] not in {"scheduled", "held"}:
+                raise ValueError("job has already progressed")
+            attempted = conn.execute(text("""
+                SELECT EXISTS(SELECT 1 FROM publish.attempts WHERE idempotency_key=:key)
+            """), {"key": row["idempotency_key"]}).scalar_one()
+            if attempted:
+                raise ValueError("delivery already attempted")
+            conn.execute(text("UPDATE publish.jobs SET state='held' WHERE job_id=:job"),
+                         {"job": job_id})
+            return "held"
