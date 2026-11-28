@@ -13,7 +13,7 @@ from sqlalchemy.engine import make_url
 
 from backend.app.dependencies import build_services
 from backend.app.main import create_app
-from backend.core.auth import generate_first_use_credential
+from backend.core.auth import AuthenticationError, generate_first_use_credential
 from backend.core.mfa import matching_step, totp
 from backend.core.permissions import Grant
 
@@ -48,6 +48,7 @@ def test_privileged_login_step_up_and_revoke(monkeypatch, tmp_path):
         env["ETEMAD_SECRET_MFA_" + role.upper()] = base64.b32encode(key).decode()
     created = []
     services = None
+    private_cleanup = None
     monkeypatch.chdir(Path(__file__).resolve().parents[1])
     import backend.core.mfa as mfa_module
 
@@ -144,12 +145,50 @@ def test_privileged_login_step_up_and_revoke(monkeypatch, tmp_path):
                 # Authorized slot reaches the existing downstream workspace-grant gate.
                 assert client.get("/v1/analysis/daily-reports/5", headers={
                     **editor, "X-ETEMAD-P19-Session": p19}).status_code == 403
+                # Real encrypted storage, synthetic report only. Reuse the existing
+                # disposable least-privilege storage fixture; no staging user data.
+                from test_migrations_postgresql import _private_report_fixture
+
+                _, _, _, _, _, private_cleanup = _private_report_fixture(services)
+                source = {"source_id": "SRC-MFA-FIXTURE", "site_url": "https://example.invalid/mfa",
+                          "feed_url": "https://example.invalid/mfa/rss", "country": "DE",
+                          "language": "en", "stream": "foreign", "license_scope": "summary",
+                          "enabled": True}
+                services.sources.register(source)
+                raw = {"schema_version": "1.0", "news_id": "NEWS-MFA-FIXTURE",
+                       "stream": "foreign", "source_id": source["source_id"],
+                       "source_country": "DE", "language": "en",
+                       "original_url": "https://example.invalid/mfa/one",
+                       "original_title": "Synthetic acceptance fixture",
+                       "original_text": "Synthetic report input; no real source.",
+                       "subject_countries": [], "collected_at": "2026-11-26T19:00:00+00:00",
+                       "content_scope": "summary", "reuse_permission": "unverified"}
+                services.pipeline.process(raw)
+                for kind, resource, action in (
+                    ("analysis_workspace", "default", "report"),
+                    ("archive", "default", "search"),
+                    ("archive", raw["news_id"], "read"),
+                    ("newsroom", raw["news_id"], "read"),
+                ):
+                    services.grants.grant(Grant(editor_id, "editor_in_chief", kind, resource, action))
+                private_headers = {**editor, "X-ETEMAD-P19-Session": p19}
+                path = "/v1/analysis/daily-reports/5"
+                generated = client.post(path, headers=private_headers, json={
+                    "period_start": "2026-11-26T18:00:00Z",
+                    "period_end": "2026-11-26T20:00:00Z"})
+                assert generated.status_code == 200
+                saved = generated.json()["saved"]
+                assert saved is not None and saved["payload"]["publishable"] is False
+                read = client.get(path, headers=private_headers)
+                assert read.status_code == 200 and read.json()["saved"] == saved
+                assert client.get(path, headers=editor).status_code == 404
+                assert client.get(path, headers={**staff, "X-ETEMAD-P19-Session": p19}).status_code == 404
                 services.grants.revoke(grant)
                 assert client.get("/v1/analysis/daily-reports/5", headers={
                     **editor, "X-ETEMAD-P19-Session": p19}).status_code == 404
                 assert client.post("/v1/auth/privileged/logout", headers=editor).status_code == 200
                 assert client.get("/v1/ui/session", headers=editor).status_code == 401
-                with pytest.raises(Exception):
+                with pytest.raises(AuthenticationError):
                     mfa.current(p19, tokens["editor_in_chief"])
                 # Expiry uses the database clock, not the TOTP test clock.
                 with services.registry.engine("central").begin() as conn:
@@ -170,6 +209,8 @@ def test_privileged_login_step_up_and_revoke(monkeypatch, tmp_path):
                 assert conn.execute(text("SELECT count(*) FROM identity.mfa_factors")).scalar_one() == 2
                 assert conn.execute(text("SELECT count(*) FROM audit.audit_entries WHERE action='auth.mfa.enroll'")).scalar_one() == 2
         finally:
+            if private_cleanup is not None:
+                private_cleanup()
             if services is not None:
                 services.registry.dispose()
             for name in reversed(created):

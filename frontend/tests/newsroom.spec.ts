@@ -74,6 +74,21 @@ describe("staff session", () => {
     expect(html).not.toContain("session-token");
   });
 
+  it("keeps an MFA challenge distinct from an access token", () => {
+    const challenge = "mc." + "a".repeat(43);
+    const response = { schema_version: "1.0", must_reset: false,
+      mfa_required: true, challenge, expires_in: 120 };
+    expect(parseAuthResult(response)).toEqual({
+      mustReset: false, mfaRequired: true, challenge, expiresIn: 120,
+    });
+    expect(() => parseAuthResult({ ...response, access_token: "fixture" })).toThrow();
+    expect(() => parseAuthResult({ ...response, expires_in: 121 })).toThrow();
+    expect(() => parseAuthResult({ ...response, challenge: "bad" })).toThrow();
+    expect(parseAuthResult({ schema_version: "1.0", must_reset: false,
+      access_token: "ps." + "b".repeat(43), token_type: "bearer", expires_in: 600
+    })).toEqual({ mustReset: false, token: "ps." + "b".repeat(43), expiresIn: 600 });
+  });
+
   it("does not accept a session before required reset", () => {
     expect(parseAuthResult({ schema_version: "1.0", must_reset: true })).toEqual({ mustReset: true });
     expect(() => parseAuthResult({
