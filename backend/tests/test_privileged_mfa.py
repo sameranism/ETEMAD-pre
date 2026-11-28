@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from psycopg import sql
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.exc import DBAPIError
 
 from backend.app.dependencies import build_services
 from backend.app.main import create_app
@@ -205,6 +206,8 @@ def test_privileged_login_step_up_and_revoke(monkeypatch, tmp_path):
                 mfa.revoke_factor(users["owner"][0], operator_id="fixture-operator")
                 assert client.post("/v1/auth/login", json={
                     "username": "fixture-owner", "password": users["owner"][1]}).status_code == 401
+            with pytest.raises(DBAPIError, match="MFA state must be preserved"):
+                command.downgrade(Config("alembic.ini"), "018_analyses")
             with services.registry.engine("central").connect() as conn:
                 assert conn.execute(text("SELECT count(*) FROM identity.mfa_factors")).scalar_one() == 2
                 assert conn.execute(text("SELECT count(*) FROM audit.audit_entries WHERE action='auth.mfa.enroll'")).scalar_one() == 2
