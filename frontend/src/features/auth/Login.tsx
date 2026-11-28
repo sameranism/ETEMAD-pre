@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { login, resetFirstLogin } from "../../lib/auth";
+import { login, resetFirstLogin, verifyMfa } from "../../lib/auth";
 
 type Props = { onSession: (token: string, expiresIn: number) => void };
 
@@ -9,15 +9,29 @@ export default function Login({ onSession }: Props) {
   const [replacement, setReplacement] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [mustReset, setMustReset] = useState(false);
+  const [challenge, setChallenge] = useState("");
+  const [challengeExpiry, setChallengeExpiry] = useState(0);
+  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const pending = useRef<AbortController | null>(null);
   useEffect(() => () => pending.current?.abort(), []);
 
+  useEffect(() => {
+    if (!challenge) return;
+    const timer = window.setTimeout(() => {
+      pending.current?.abort(); pending.current = null; setBusy(false);
+      setChallenge(""); setCode(""); setChallengeExpiry(0);
+      setError("مهلت تأیید پایان یافت. دوباره وارد شوید.");
+    }, Math.max(0, challengeExpiry - Date.now()));
+    return () => window.clearTimeout(timer);
+  }, [challenge, challengeExpiry]);
+
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (pending.current) return;
-    if (mustReset && (replacement.length < 12 || replacement !== confirmation || replacement === password)) {
+    if (challenge && !/^[0-9]{6}$/.test(code)) { setError("کد شش رقمی را وارد کنید."); return; }
+    if (!challenge && mustReset && (replacement.length < 12 || replacement !== confirmation || replacement === password)) {
       setError("گذرواژه جدید باید حداقل ۱۲ نویسه، متفاوت از گذرواژه اولیه و با تکرار آن یکسان باشد.");
       return;
     }
@@ -26,7 +40,7 @@ export default function Login({ onSession }: Props) {
     setBusy(true);
     setError("");
     try {
-      const result = mustReset
+      const result = challenge ? await verifyMfa(challenge, code, controller.signal) : mustReset
         ? await resetFirstLogin(username.trim(), password, replacement, controller.signal)
         : await login(username.trim(), password, controller.signal);
       if (controller.signal.aborted) return;
@@ -34,7 +48,12 @@ export default function Login({ onSession }: Props) {
         setMustReset(true);
         return;
       }
-      setPassword("");
+      if ("mfaRequired" in result) {
+        setMustReset(false); setPassword(""); setReplacement(""); setConfirmation("");
+        setChallenge(result.challenge); setChallengeExpiry(Date.now() + result.expiresIn * 1000);
+        setCode(""); return;
+      }
+      setChallenge(""); setCode(""); setPassword("");
       setReplacement("");
       setConfirmation("");
       onSession(result.token, result.expiresIn);
@@ -52,6 +71,19 @@ export default function Login({ onSession }: Props) {
 
   return (
     <form onSubmit={submit} dir="rtl" aria-busy={busy}>
+      {challenge ? <>
+        <h2>تأیید دومرحله‌ای</h2>
+        <p>کد یک‌بارمصرف برنامه احراز هویت را وارد کنید.</p>
+        <label htmlFor="mfa-code">کد تأیید</label>
+        <input id="mfa-code" value={code} type="text" inputMode="numeric" dir="ltr"
+          autoComplete="one-time-code" pattern="[0-9]{6}" maxLength={6} required
+          disabled={busy} onChange={event => setCode(event.target.value)} />
+        {error && <p role="alert">{error}</p>}
+        <button type="submit" disabled={busy || code.length !== 6}>تأیید و ورود</button>
+        <button type="button" disabled={busy} onClick={() => {
+          setChallenge(""); setCode(""); setChallengeExpiry(0); setError("");
+        }}>بازگشت به ورود</button>
+      </> : <>
       <h2>{mustReset ? "تغییر گذرواژه اولیه" : "ورود به تحریریه"}</h2>
       <p>{mustReset ? "پیش از دسترسی، گذرواژه شخصی خود را تعیین کنید." : "با حساب کاربری اختصاصی وارد شوید."}</p>
       <label htmlFor="login-username">نام کاربری</label>
@@ -80,6 +112,7 @@ export default function Login({ onSession }: Props) {
         setConfirmation("");
         setError("");
       }}>بازگشت</button>}
+      </>}
     </form>
   );
 }

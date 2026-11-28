@@ -349,9 +349,29 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
             result = handler(payload.evidence, request, response, principal, services)
         return {**result, "assistant_action": action}
 
+    def private_step_up(request: Request, principal: Principal, services: Services) -> bool:
+        if services.accounts is None:
+            return True  # existing isolated fixture composition only
+        if services.mfa is None or principal.role != "editor_in_chief":
+            return False
+        from backend.core.auth import AuthenticationError, bearer_token
+        parent = bearer_token(request.headers.get("Authorization"))
+        step_up = request.headers.get("X-ETEMAD-P19-Session")
+        if not parent or not step_up:
+            return False
+        try:
+            return services.mfa.current(step_up, parent) == principal
+        except AuthenticationError:
+            return False
+
     def report_access(slot: int, request: Request, principal: Principal, services: Services) -> None:
         corr = correlation_id(request)
         if slot in PRIVATE_SLOTS:
+            if not private_step_up(request, principal, services):
+                services.auditor.record(action="auth.p19.access", actor_id=principal.subject_id,
+                    actor_role=principal.role, resource_type="private_report",
+                    resource_id=f"slot-{slot}", decision="DENIED", correlation_id=corr)
+                raise APIError(ErrorCode.NOT_FOUND)
             authorize(services, principal, resource_type="private_report", resource_id=f"slot-{slot}",
                       action="read", correlation_id=corr)
         elif slot not in PUBLIC_SLOTS:
@@ -372,7 +392,8 @@ def build_router(*, services_dep: Callable[..., Any], principal_dep: Callable[..
                  for i, (_, title) in PUBLIC_SLOTS.items()]
         slots += [{"slot": i, "title": title, "private": True, "generation_enabled": services.reports is not None and services.reports.private_available}
                   for i, (_, title) in PRIVATE_SLOTS.items()
-                  if decide_access(principal.subject_id, principal.role, "private_report", f"slot-{i}",
+                  if private_step_up(request, principal, services)
+                  and decide_access(principal.subject_id, principal.role, "private_report", f"slot-{i}",
                                    "read", services.grants, classification="executive_private")["allowed"] is True]
         response.headers["Cache-Control"] = "no-store"
         return {"schema_version": "1.0", "slots": slots}

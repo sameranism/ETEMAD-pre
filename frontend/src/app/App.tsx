@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import Login from "../features/auth/Login";
-import { authMode, type AuthMode } from "../lib/auth";
+import { authMode, revokePrivilegedSession, type AuthMode } from "../lib/auth";
 import DashboardSession from "../features/dashboard/DashboardSession";
 export { parseNewsFeed } from "../lib/news";
 
@@ -9,6 +9,7 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [mode, setMode] = useState<AuthMode | "loading" | "error">("loading");
+  const [logoutError, setLogoutError] = useState("");
   const [expiry, setExpiry] = useState<number | null>(null);
   useEffect(() => {
     const controller = new AbortController();
@@ -29,13 +30,25 @@ export default function App() {
     setToken(next); setExpiry(null); setDraft(""); setAttempt(n => n + 1);
   }
   function staffSession(next: string, expiresIn: number) {
+    setLogoutError("");
     setExpiry(Date.now() + expiresIn * 1000); setToken(next); setAttempt(n => n + 1);
   }
   function disconnect() { setToken(""); setExpiry(null); setDraft(""); }
+  async function logout() {
+    const current = token;
+    disconnect();
+    if (current.startsWith("ps.")) {
+      try { await revokePrivilegedSession(current); }
+      catch { setLogoutError("نشست محلی بسته شد؛ ابطال سرور تأیید نشد."); }
+    }
+  }
   return <div className="app-frame" dir="rtl">
     <header className="masthead">
       <div><p className="eyebrow">رابط تحریریه</p><h1>اعتماد <span>· میز خبر</span></h1></div>
-      {token && <button type="button" onClick={disconnect}>قطع نشست</button>}
+      {token && <button type="button" onClick={logout}>قطع نشست</button>}
+      {token.startsWith("ps.") && expiry !== null &&
+        <p role="status">نشست ممتاز · پایان اعتبار {new Date(expiry).toLocaleTimeString("fa-IR")}</p>}
+      {logoutError && <p role="alert">{logoutError}</p>}
     </header>
     <main>
       {!token ? (
