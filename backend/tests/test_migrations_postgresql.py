@@ -68,7 +68,9 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             central = Config("alembic.ini")
             command.upgrade(central, "head")
             central_tables = tables("central")
-            assert len(central_tables) == 29
+            assert len(central_tables) == 33
+            assert {('identity', t) for t in ('mfa_factors', 'auth_challenges',
+                'privileged_sessions', 'mfa_throttle')} <= central_tables
             assert ("ui", "saved_views") in central_tables
             assert {("orchestration", "outbox"), ("orchestration", "jobs")} <= central_tables
             assert {("insights", "public_report_drafts"), ("executive", "private_reports")} <= central_tables
@@ -104,8 +106,8 @@ def test_migration_round_trip_and_database_separation(monkeypatch, tmp_path):
             assert tables("central") == central_tables
             command.downgrade(central, "001_baseline")
             assert tables("central") == {
-                row for row in central_tables
-                if row[0] not in {"processing", "sources", "editorial", "archive", "publish", "insights", "orchestration", "executive", "ui"} and row not in {("identity", "login_throttle"), ("control", "ai_cost_reservations")}
+                ("audit", "audit_entries"), ("control", "config_revisions"),
+                ("control", "output_switches"), ("identity", "users"), ("identity", "grants"),
             }
             command.downgrade(central, "base")
             assert tables("central") == set()

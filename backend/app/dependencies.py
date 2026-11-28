@@ -28,11 +28,13 @@ from backend.core.auth import PostgresAccountStore
 from backend.core.db import DatabaseRegistry
 from backend.core.events import InMemoryEventBus
 from backend.core.jobs import JobQueue, PostgresWorkflowJobs
+from backend.core.mfa import PostgresMFA
 from backend.core.object_store import LocalObjectStore
 from backend.core.orchestrator import Orchestrator, ProcessingHandoff
 from backend.core.outbox import Outbox, PostgresOutbox
 from backend.core.output_switches import OutputSwitches, default_off_switches
 from backend.core.permissions import InMemoryGrantStore, PostgresGrantStore
+from backend.core.secrets import EnvSecretStore
 from backend.core.settings_service import (
     DOMESTIC_INGEST_CONFIG_ID,
     DOMESTIC_INGEST_SCOPE,
@@ -91,6 +93,7 @@ class Services:
     pipeline: IngestPipeline
     transport: FeedTransport
     accounts: PostgresAccountStore | None = None
+    mfa: PostgresMFA | None = None
     foreign_workflow: ForeignWorkflow | None = None
     editorial: EditorialRepository | None = None
     editorial_generator: EditorialGenerator | None = None
@@ -168,6 +171,10 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
     if identity not in {"fixture", "postgres"}:
         raise ValueError("invalid ETEMAD_IDENTITY_STORAGE")
     accounts: PostgresAccountStore | None = None
+    mfa: PostgresMFA | None = None
+    mfa_mode = environ.get("ETEMAD_PRIVILEGED_MFA", "off")
+    if mfa_mode not in {"off", "totp"} or (mfa_mode == "totp" and identity != "postgres"):
+        raise ValueError("privileged MFA requires persistent private staging identity")
     grant_store: InMemoryGrantStore
     audit_sink: InMemoryAuditSink | PostgresAuditSink
     if identity == "postgres":
@@ -178,7 +185,9 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         # A fixture bearer must never be accepted in persistent identity mode.
         marker_key = hmac.new(session_key, b"etemad-account-marker-v1", hashlib.sha256).digest()
         session_key = hmac.new(session_key, b"etemad-staff-session-v1", hashlib.sha256).digest()
-        accounts = PostgresAccountStore(registry, marker_key)
+        accounts = PostgresAccountStore(registry, marker_key, privileged=mfa_mode == "totp")
+        if mfa_mode == "totp":
+            mfa = PostgresMFA(registry.engine("central"), accounts, EnvSecretStore(environ))
         grant_store = PostgresGrantStore(registry)
         audit_sink = PostgresAuditSink(registry)
     else:
@@ -301,6 +310,7 @@ def build_services(environ: Mapping[str, str] | None = None) -> Services:
         pipeline=pipeline,
         transport=transport,
         accounts=accounts,
+        mfa=mfa,
         foreign_workflow=foreign_workflow,
         news_archive=news_archive,
         workflow_jobs=workflow_jobs,

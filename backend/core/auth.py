@@ -173,18 +173,23 @@ class AccountLimitReached(RuntimeError):
 class PostgresAccountStore:
     """P28-owned identity.users storage. No credential values are logged.
 
-    Privileged account login remains disabled until MFA is implemented.
+    Privileged password checks are enabled only by the MFA composition.
+    Password verification alone never authorizes a privileged API session.
     Provisioning is an explicit trusted operator action, not an HTTP endpoint.
     """
 
-    def __init__(self, registry: DatabaseRegistry, marker_key: bytes) -> None:
+    def __init__(self, registry: DatabaseRegistry, marker_key: bytes, *, privileged: bool = False) -> None:
         self._registry = registry
         if len(marker_key) < 32:
             raise ValueError("identity signing key must have at least 32 bytes")
         self._marker_key = marker_key
+        self.privileged = privileged
 
     def _principal(self, user_id: str, role: str, reset: bool, encoded: str) -> Principal:
-        marker = hmac.new(self._marker_key, b"account-marker\\0" + encoded.encode(), hashlib.sha256).hexdigest()
+        material = b"account-marker\\0" + encoded.encode()
+        if role != "staff":
+            material += b"\0" + role.encode("ascii")
+        marker = hmac.new(self._marker_key, material, hashlib.sha256).hexdigest()
         return Principal(user_id, role, reset, marker)
 
     def _engine(self) -> Engine:
@@ -237,7 +242,7 @@ class PostgresAccountStore:
                 SELECT user_id, role_id, password_hash, must_reset, is_active
                 FROM identity.users WHERE username = :username
             """), {"username": username}).mappings().one_or_none()
-        if row is None or not row["is_active"] or row["role_id"] != "staff":
+        if row is None or not row["is_active"] or (row["role_id"] != "staff" and not self.privileged):
             # The same memory-hard operation is performed for missing/disabled
             # accounts and privileged roles; do not reveal account existence.
             verify_password(password, _DUMMY_PASSWORD_HASH)
@@ -252,7 +257,7 @@ class PostgresAccountStore:
                 SELECT role_id, must_reset, password_hash FROM identity.users
                 WHERE user_id = :id AND is_active
             """), {"id": user_id}).mappings().one_or_none()
-        if row is None or row["role_id"] != "staff":
+        if row is None or (row["role_id"] != "staff" and not self.privileged):
             raise AuthenticationError("invalid credentials")
         return self._principal(user_id, row["role_id"], row["must_reset"], row["password_hash"])
 
@@ -266,7 +271,7 @@ class PostgresAccountStore:
                 SELECT user_id, role_id, password_hash, must_reset, is_active
                 FROM identity.users WHERE username = :username FOR UPDATE
             """), {"username": username}).mappings().one_or_none()
-            if row is None or not row["is_active"] or row["role_id"] != "staff" or not row["must_reset"]:
+            if row is None or not row["is_active"] or (row["role_id"] != "staff" and not self.privileged) or not row["must_reset"]:
                 verify_password(temporary, _DUMMY_PASSWORD_HASH)
                 raise AuthenticationError("invalid credentials")
             if not verify_password(temporary, row["password_hash"]):
@@ -280,7 +285,7 @@ class PostgresAccountStore:
                 UPDATE identity.users SET password_hash = :encoded, must_reset = false
                 WHERE user_id = :id
             """), {"encoded": encoded, "id": row["user_id"]})
-            return self._principal(row["user_id"], "staff", False, encoded)
+            return self._principal(row["user_id"], row["role_id"], False, encoded)
 
 
 # Non-account random value: never a usable account credential.

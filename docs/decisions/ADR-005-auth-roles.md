@@ -42,3 +42,27 @@ owner by default, and no shared or default password may exist.
 
 - Whether the newspaper wants SSO/AD later — deferred to phase 2, not a blocker.
 - Identity of the 10 humans and their role assignment — client input required before production.
+
+## 2026-11-28 owner-approved environment mapping (Stage 2)
+
+The canonical role identifiers are unchanged. Display names follow B09: owner =
+system administrator (مالک سامانه), editor_in_chief = newsroom director
+(مدیرمسئول), staff = individually scoped newsroom staff (کارکنان). These are
+three independent workspaces after a common authentication flow. Private P19 is
+a separate intended environment; its independent credential and page remain
+gated by policy and a separately authorized design, not delivered by this slice.
+
+- Keep staff's existing 900-second password/reset session.
+- Privileged password success is not a session. Require TOTP with durable,
+  single-use challenge (120 seconds), factor replay state, throttling and
+  separately revocable privileged session (600 seconds).
+- P19 infrastructure: a separately scoped step-up token (300 seconds at most,
+  bounded by parent session) and a current grant for each slot; owner and staff
+  remain denied. This is not independent P19 password login or its UI.
+- Secret references only; enrollment/recovery through a trusted operator.
+  Activation is default-off and private fixture staging only.
+- Four additive P28 tables in revision 019_privileged_mfa are owner-authorized.
+  Never downgrade away enrolled factors or session history. No production.
+- No alteration to the frozen private_report or access_decision schemas.
+- Any extension of P19 eligibility, including owner or staff, requires a
+  separate accepted ADR and explicit implementation authorization.

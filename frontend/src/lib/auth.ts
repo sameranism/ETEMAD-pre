@@ -1,6 +1,7 @@
 export type AuthMode = "fixture" | "staff";
 export type AuthResult =
   | { mustReset: true }
+  | { mustReset: false; mfaRequired: true; challenge: string; expiresIn: number }
   | { mustReset: false; token: string; expiresIn: number };
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -22,7 +23,13 @@ export async function authMode(signal: AbortSignal): Promise<AuthMode> {
 export function parseAuthResult(value: unknown): AuthResult {
   if (!object(value) || value.schema_version !== "1.0") throw new Error("پاسخ ورود نامعتبر است.");
   if (value.must_reset === true && !("access_token" in value)) return { mustReset: true };
-  if (value.must_reset === false && value.token_type === "bearer" &&
+  if (value.must_reset === false && value.mfa_required === true && !("access_token" in value) &&
+      typeof value.challenge === "string" && /^mc\.[A-Za-z0-9_-]{43}$/.test(value.challenge) &&
+      typeof value.expires_in === "number" && Number.isInteger(value.expires_in) &&
+      value.expires_in > 0 && value.expires_in <= 120) {
+    return { mustReset: false, mfaRequired: true, challenge: value.challenge, expiresIn: value.expires_in };
+  }
+  if (value.must_reset === false && value.mfa_required !== true && value.token_type === "bearer" &&
       typeof value.access_token === "string" && value.access_token.length > 0 &&
       typeof value.expires_in === "number" && Number.isInteger(value.expires_in) &&
       value.expires_in > 0 && value.expires_in <= 900) {
@@ -52,4 +59,16 @@ export function resetFirstLogin(username: string, temporaryPassword: string, new
   return submit("/v1/auth/first-login/reset", {
     username, temporary_password: temporaryPassword, new_password: newPassword,
   }, signal);
+}
+
+export function verifyMfa(challenge: string, code: string, signal: AbortSignal) {
+  return submit("/v1/auth/mfa/verify", { challenge, code }, signal);
+}
+
+export async function revokePrivilegedSession(token: string): Promise<void> {
+  const response = await fetch("/v1/auth/privileged/logout", {
+    method: "POST", cache: "no-store", credentials: "same-origin", redirect: "error",
+    headers: { Authorization: "Bearer " + token },
+  });
+  if (!response.ok && response.status !== 401) throw new Error("ابطال نشست تأیید نشد.");
 }

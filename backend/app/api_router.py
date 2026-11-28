@@ -28,6 +28,7 @@ from backend.core.auth import (
 )
 from backend.core.errors import APIError, ErrorCode, correlation_id_for
 from backend.core.health import health_report
+from backend.core.mfa import CHALLENGE_TTL, MFARateLimited
 from backend.core.permissions import decide_access, require_access
 from backend.core.sources_service import SourceNotAllowed, SourceNotFound
 from backend.modules.domestic.api import build_router as build_domestic_router
@@ -60,10 +61,14 @@ def current_principal(request: Request, services: Services = Depends(get_service
     if not token:
         raise APIError(ErrorCode.UNAUTHORIZED)
     try:
+        if services.mfa is not None and token.startswith("ps."):
+            return services.mfa.current(token)
         principal = verify_session(token, services.session_key)
         if principal.must_reset_password:
             raise AuthenticationError("credential reset required")
         if services.accounts is not None:
+            if principal.role != "staff":
+                raise AuthenticationError("privileged session required")
             current = services.accounts.current(principal.subject_id)
             if current.must_reset_password or not principal.session_marker or current != principal:
                 raise AuthenticationError("session is no longer valid")
@@ -116,6 +121,15 @@ def _session_response(principal: Principal, services: Services, response: Respon
     response.headers["Cache-Control"] = "no-store"
     if principal.must_reset_password:
         return {"schema_version": "1.0", "must_reset": True}
+    if principal.role != "staff":
+        if services.mfa is None:
+            raise APIError(ErrorCode.UNAUTHORIZED)
+        try:
+            challenge = services.mfa.start(principal)
+        except AuthenticationError:
+            raise APIError(ErrorCode.UNAUTHORIZED) from None
+        return {"schema_version": "1.0", "must_reset": False, "mfa_required": True,
+                "challenge": challenge, "expires_in": CHALLENGE_TTL}
     return {
         "schema_version": "1.0",
         "must_reset": False,
@@ -142,8 +156,15 @@ def login(
     except AuthenticationError:
         _auth_audit(services, request, "auth.login", "DENIED")
         raise APIError(ErrorCode.UNAUTHORIZED) from None
-    _auth_audit(services, request, "auth.login", "RESET_REQUIRED" if principal.must_reset_password else "ALLOWED", principal)
-    return _session_response(principal, services, response)
+    try:
+        result = _session_response(principal, services, response)
+    except APIError:
+        _auth_audit(services, request, "auth.login", "DENIED", principal)
+        raise
+    decision = "RESET_REQUIRED" if principal.must_reset_password else (
+        "MFA_REQUIRED" if principal.role != "staff" else "ALLOWED")
+    _auth_audit(services, request, "auth.login", decision, principal)
+    return result
 
 
 @router.post("/auth/first-login/reset", tags=["auth"])
@@ -163,8 +184,98 @@ def first_login_reset(
     except ValueError:
         _auth_audit(services, request, "auth.first_reset", "DENIED")
         raise APIError(ErrorCode.CONTRACT_INVALID) from None
-    _auth_audit(services, request, "auth.first_reset", "ALLOWED", principal)
-    return _session_response(principal, services, response)
+    try:
+        result = _session_response(principal, services, response)
+    except APIError:
+        _auth_audit(services, request, "auth.first_reset", "MFA_UNAVAILABLE", principal)
+        raise
+    _auth_audit(services, request, "auth.first_reset",
+                "MFA_REQUIRED" if principal.role != "staff" else "ALLOWED", principal)
+    return result
+
+
+class MFAInput(BaseModel):
+    challenge: SecretStr = Field(min_length=1, max_length=128)
+    code: SecretStr = Field(min_length=1, max_length=16)
+
+
+@router.post("/auth/mfa/verify", tags=["auth"])
+def mfa_verify(payload: MFAInput, request: Request, response: Response,
+               services: Services = Depends(get_services)) -> dict[str, Any]:
+    if services.mfa is None:
+        raise APIError(ErrorCode.NOT_FOUND)
+    try:
+        token, ttl, principal = services.mfa.finish(
+            payload.challenge.get_secret_value(), payload.code.get_secret_value())
+    except MFARateLimited:
+        _auth_audit(services, request, "auth.mfa", "RATE_LIMITED")
+        raise APIError(ErrorCode.RATE_LIMITED) from None
+    except AuthenticationError:
+        _auth_audit(services, request, "auth.mfa", "DENIED")
+        raise APIError(ErrorCode.UNAUTHORIZED) from None
+    _auth_audit(services, request, "auth.mfa", "ALLOWED", principal)
+    response.headers["Cache-Control"] = "no-store"
+    return {"schema_version": "1.0", "must_reset": False, "token_type": "bearer",
+            "access_token": token, "expires_in": ttl}
+
+
+@router.post("/auth/privileged/logout", tags=["auth"])
+def privileged_logout(request: Request, response: Response,
+                      principal: Principal = Depends(current_principal),
+                      services: Services = Depends(get_services)) -> dict[str, Any]:
+    token = bearer_token(request.headers.get("Authorization"))
+    if services.mfa is None or token is None or not token.startswith("ps."):
+        raise APIError(ErrorCode.NOT_FOUND)
+    services.mfa.revoke(token)
+    _auth_audit(services, request, "auth.privileged.logout", "ALLOWED", principal)
+    response.headers["Cache-Control"] = "no-store"
+    return {"schema_version": "1.0", "revoked": True}
+
+
+@router.post("/auth/p19/challenge", tags=["auth"])
+def p19_challenge(request: Request, response: Response,
+                  principal: Principal = Depends(current_principal),
+                  services: Services = Depends(get_services)) -> dict[str, Any]:
+    parent = bearer_token(request.headers.get("Authorization"))
+    if services.mfa is None or parent is None or principal.role != "editor_in_chief":
+        raise APIError(ErrorCode.NOT_FOUND)
+    # This is an infrastructure-only step-up; independent P19 password and UI
+    # are not activated under the existing policy.
+    if not any(decide_access(principal.subject_id, principal.role, "private_report",
+                             f"slot-{slot}", "read", services.grants,
+                             classification="executive_private")["allowed"] is True
+               for slot in (5, 6, 7)):
+        _auth_audit(services, request, "auth.p19.challenge", "DENIED", principal)
+        raise APIError(ErrorCode.NOT_FOUND)
+    try:
+        challenge = services.mfa.start(principal, parent)
+    except AuthenticationError:
+        _auth_audit(services, request, "auth.p19.challenge", "DENIED", principal)
+        raise APIError(ErrorCode.NOT_FOUND) from None
+    _auth_audit(services, request, "auth.p19.challenge", "MFA_REQUIRED", principal)
+    response.headers["Cache-Control"] = "no-store"
+    return {"schema_version": "1.0", "challenge": challenge, "expires_in": CHALLENGE_TTL}
+
+
+@router.post("/auth/p19/verify", tags=["auth"])
+def p19_verify(payload: MFAInput, request: Request, response: Response,
+               principal: Principal = Depends(current_principal),
+               services: Services = Depends(get_services)) -> dict[str, Any]:
+    parent = bearer_token(request.headers.get("Authorization"))
+    if services.mfa is None or parent is None or principal.role != "editor_in_chief":
+        raise APIError(ErrorCode.NOT_FOUND)
+    try:
+        token, ttl, verified = services.mfa.finish(
+            payload.challenge.get_secret_value(), payload.code.get_secret_value(), parent)
+    except MFARateLimited:
+        _auth_audit(services, request, "auth.p19.verify", "RATE_LIMITED", principal)
+        raise APIError(ErrorCode.RATE_LIMITED) from None
+    except AuthenticationError:
+        _auth_audit(services, request, "auth.p19.verify", "DENIED", principal)
+        raise APIError(ErrorCode.NOT_FOUND) from None
+    _auth_audit(services, request, "auth.p19.verify", "ALLOWED", verified)
+    response.headers["Cache-Control"] = "no-store"
+    return {"schema_version": "1.0", "step_up_token": token, "expires_in": ttl}
 
 
 def _authorize(
